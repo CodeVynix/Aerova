@@ -1,9 +1,9 @@
-//! Aerova shell v0.2: CLI with crawl + persistent search index.
+//! Aerova shell v0.3: CLI with crawl + search + isolated tabs demo.
 
 use std::path::{Path, PathBuf};
 
 fn usage() -> &'static str {
-    "usage: aerova <open <url|file> [--shot out.ppm] | crawl <url>... [--db FILE] | search <query> [--db FILE] | js <code> | home>"
+    "usage: aerova <open <url|file> [--shot out.ppm] | crawl <url>... [--db FILE] | search <query> [--db FILE] | tabs demo | js <code> | home>"
 }
 
 fn parse_db(args: &[String]) -> Option<PathBuf> {
@@ -49,6 +49,7 @@ fn main() {
         eprintln!("{usage}", usage = usage());
         std::process::exit(2);
     }
+    let policy = aerova_engine::IsolationPolicy::per_tab_thread();
     match args[0].as_str() {
         "open" => {
             if args.len() < 2 {
@@ -61,7 +62,7 @@ fn main() {
             } else {
                 format!("file://{target}")
             };
-            match aerova_engine::render_url(&url) {
+            match aerova_engine::render_isolated(&url, &policy) {
                 Ok((text, fb)) => {
                     println!("{text}");
                     if args.len() == 4 && args[2] == "--shot" {
@@ -131,6 +132,19 @@ fn main() {
                 }
             }
         }
+        "tabs" => {
+            let mut m = aerova_engine::TabManager::new();
+            let a = m.new_tab("aerova://home");
+            let b = m.new_tab("aerova://home");
+            m.navigate(b, "bogus://nope");
+            for (id, url) in m.list() {
+                match aerova_engine::render_isolated(&url, &policy) {
+                    Ok((text, _)) => println!("tab {id} ok: {text}"),
+                    Err(e) => println!("tab {id} isolated failure (tab survives): {e}"),
+                }
+            }
+            let _ = (a, b);
+        }
         "js" => {
             let code = args[1..].join(" ");
             match aerova_js::eval(&code) {
@@ -141,7 +155,7 @@ fn main() {
                 }
             }
         }
-        "home" => match aerova_engine::render_url("aerova://home") {
+        "home" => match aerova_engine::render_isolated("aerova://home", &policy) {
             Ok((text, _)) => println!("{text}"),
             Err(e) => {
                 eprintln!("{e}");

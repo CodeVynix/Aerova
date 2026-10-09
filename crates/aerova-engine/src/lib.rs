@@ -1,10 +1,161 @@
 //! Aerova engine: fetch -> parse -> style -> layout -> paint.
-//! Phase 3 wires CSS cascade into boxes + framebuffer.
+//! Phase 3 wires CSS cascade. Phase 4 adds tabs + per-tab isolation stub.
+//! Real OS processes later (Lumora); threads now give crash containment.
 
+use std::collections::HashMap;
 use std::path::Path;
 
 /// Document id re-export for shell convenience.
 pub use aerova_search::DocId;
+
+/// Tab identifier.
+pub type TabId = usize;
+
+/// One browser tab with isolated history.
+#[derive(Debug, Clone)]
+pub struct Tab {
+    /// Tab id.
+    pub id: TabId,
+    history: Vec<String>,
+    pos: usize,
+}
+
+impl Tab {
+    /// Current URL, if any.
+    #[must_use]
+    pub fn current(&self) -> Option<&str> {
+        self.history.get(self.pos).map(String::as_str)
+    }
+}
+
+/// Manager for independent tabs. Each tab owns its history; no shared mutable state.
+#[derive(Debug, Default)]
+pub struct TabManager {
+    tabs: HashMap<TabId, Tab>,
+    next: TabId,
+}
+
+impl TabManager {
+    /// Create empty manager.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Open a new tab at `url`, returns id.
+    pub fn new_tab(&mut self, url: &str) -> TabId {
+        let id = self.next;
+        self.next += 1;
+        self.tabs.insert(
+            id,
+            Tab {
+                id,
+                history: vec![url.to_string()],
+                pos: 0,
+            },
+        );
+        id
+    }
+
+    /// Navigate tab to `url`. Returns false if tab is missing.
+    pub fn navigate(&mut self, id: TabId, url: &str) -> bool {
+        if let Some(tab) = self.tabs.get_mut(&id) {
+            tab.history.truncate(tab.pos + 1);
+            tab.history.push(url.to_string());
+            tab.pos = tab.history.len() - 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Go back. Returns new current URL or `None`.
+    pub fn back(&mut self, id: TabId) -> Option<String> {
+        if let Some(tab) = self.tabs.get_mut(&id) {
+            if tab.pos > 0 {
+                tab.pos -= 1;
+                return tab.current().map(ToString::to_string);
+            }
+        }
+        None
+    }
+
+    /// Go forward. Returns new current URL or `None`.
+    pub fn forward(&mut self, id: TabId) -> Option<String> {
+        if let Some(tab) = self.tabs.get_mut(&id) {
+            if tab.pos + 1 < tab.history.len() {
+                tab.pos += 1;
+                return tab.current().map(ToString::to_string);
+            }
+        }
+        None
+    }
+
+    /// Current URL for tab.
+    #[must_use]
+    pub fn current(&self, id: TabId) -> Option<String> {
+        self.tabs
+            .get(&id)
+            .and_then(|t| t.current().map(ToString::to_string))
+    }
+
+    /// List `(id, current_url)` sorted by id.
+    #[must_use]
+    pub fn list(&self) -> Vec<(TabId, String)> {
+        let mut v: Vec<(TabId, String)> = self
+            .tabs
+            .iter()
+            .map(|(id, t)| (*id, t.current().unwrap_or("").to_string()))
+            .collect();
+        v.sort_by_key(|(id, _)| *id);
+        v
+    }
+
+    /// Close tab. Returns true if it existed.
+    pub fn close(&mut self, id: TabId) -> bool {
+        self.tabs.remove(&id).is_some()
+    }
+
+    /// Number of open tabs.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.tabs.len()
+    }
+
+    /// True if no tabs.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.tabs.is_empty()
+    }
+}
+
+/// How a tab render is isolated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum IsolationMode {
+    /// Same thread (fastest, no containment).
+    #[default]
+    InProcess,
+    /// Spawned thread per render; panic in one tab cannot kill the shell.
+    /// Lumora later maps this to per-tab processes.
+    PerTabThread,
+}
+
+/// Policy wrapper (extensible to sandbox/CSP later).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct IsolationPolicy {
+    /// Mode.
+    pub mode: IsolationMode,
+}
+
+impl IsolationPolicy {
+    /// Per-tab thread containment.
+    #[must_use]
+    pub fn per_tab_thread() -> Self {
+        Self {
+            mode: IsolationMode::PerTabThread,
+        }
+    }
+}
 
 /// Collect CSS text from `<style>` elements.
 fn extract_css(doc: &aerova_dom::Document) -> String {
@@ -104,6 +255,25 @@ pub fn render_url(url: &str) -> Result<(String, aerova_paint::Framebuffer), Stri
     Ok((text, fb))
 }
 
+/// Render with isolation policy. `PerTabThread` contains panics per tab.
+/// # Errors
+/// Returns fetch error or `tab crashed` panic containment.
+pub fn render_isolated(
+    url: &str,
+    policy: &IsolationPolicy,
+) -> Result<(String, aerova_paint::Framebuffer), String> {
+    match policy.mode {
+        IsolationMode::InProcess => render_url(url),
+        IsolationMode::PerTabThread => {
+            let owned = url.to_string();
+            match std::thread::spawn(move || render_url(&owned)).join() {
+                Ok(r) => r,
+                Err(_) => Err("tab crashed (panic isolated)".to_string()),
+            }
+        }
+    }
+}
+
 /// Render file to PPM screenshot.
 /// # Errors
 /// Returns IO/fetch error string.
@@ -185,7 +355,6 @@ mod tests {
         let (text, boxes, fb) = render_text(html);
         assert!(text.contains("hi"));
         assert!(!boxes.is_empty());
-        // Box with red background exists and top-left of its rect is red.
         let div_box = boxes.iter().find(|b| b.kind == "div").unwrap();
         assert_eq!(div_box.h, 40);
         let i = ((div_box.y * 800 + div_box.x) as usize) * 4;
@@ -198,5 +367,29 @@ mod tests {
         let id = index_url(&mut idx, "aerova://home").unwrap();
         assert_eq!(id, 0);
         assert_eq!(idx.search("aerova", 10).len(), 1);
+    }
+
+    #[test]
+    fn tabs_navigate_back_forward() {
+        let mut m = TabManager::new();
+        let a = m.new_tab("aerova://home");
+        let b = m.new_tab("aerova://home");
+        assert_eq!(m.len(), 2);
+        assert!(m.navigate(a, "file:///tmp/x.html"));
+        assert_eq!(m.current(a).unwrap(), "file:///tmp/x.html");
+        assert_eq!(m.back(a).unwrap(), "aerova://home");
+        assert_eq!(m.forward(a).unwrap(), "file:///tmp/x.html");
+        assert_eq!(m.current(b).unwrap(), "aerova://home");
+        assert!(m.close(a));
+        assert_eq!(m.len(), 1);
+    }
+
+    #[test]
+    fn isolation_contains_bad_url() {
+        let policy = IsolationPolicy::per_tab_thread();
+        assert!(render_isolated("aerova://home", &policy).is_ok());
+        assert!(render_isolated("bogus://nope", &policy).is_err());
+        // Other tab still works after a failure.
+        assert!(render_isolated("aerova://home", &policy).is_ok());
     }
 }
