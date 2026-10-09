@@ -1,0 +1,12 @@
+[package]
+name = "aerova-engine"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+aerova-dom = { path = "../aerova-dom" }
+aerova-html = { path = "../aerova-html" }
+aerova-css = { path = "../aerova-css" }
+aerova-layout = { path = "../aerova-layout" }
+aerova-paint = { path = "../aerova-paint" }
+aerova-net = { path = "../aerova-net" }

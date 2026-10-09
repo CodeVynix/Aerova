@@ -1,0 +1,13 @@
+[package]
+name = "aerova-shell"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "aerova"
+path = "src/main.rs"
+
+[dependencies]
+aerova-engine = { path = "../aerova-engine" }
+aerova-search = { path = "../aerova-search" }
+aerova-js = { path = "../aerova-js" }
