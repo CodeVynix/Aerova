@@ -18,7 +18,7 @@ version = "0.1.0"
 
 [[package]]
 name = "aerova-engine"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "aerova-css",
  "aerova-dom",
@@ -26,6 +26,7 @@ dependencies = [
  "aerova-layout",
  "aerova-net",
  "aerova-paint",
+ "aerova-search",
 ]
 
 [[package]]

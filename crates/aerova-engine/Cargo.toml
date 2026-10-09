@@ -1,6 +1,6 @@
 [package]
 name = "aerova-engine"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 
 [dependencies]
@@ -10,3 +10,4 @@ aerova-css = { path = "../aerova-css" }
 aerova-layout = { path = "../aerova-layout" }
 aerova-paint = { path = "../aerova-paint" }
 aerova-net = { path = "../aerova-net" }
+aerova-search = { path = "../aerova-search" }
