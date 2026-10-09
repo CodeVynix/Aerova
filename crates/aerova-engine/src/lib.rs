@@ -1,12 +1,79 @@
-//! Aerova engine: fetch -> parse -> layout -> paint orchestration.
-//! Phase 2 adds `index_url` crawl hook into `aerova-search`.
+//! Aerova engine: fetch -> parse -> style -> layout -> paint.
+//! Phase 3 wires CSS cascade into boxes + framebuffer.
 
 use std::path::Path;
 
 /// Document id re-export for shell convenience.
 pub use aerova_search::DocId;
 
-/// Render HTML text to text + boxes + framebuffer stub.
+/// Collect CSS text from `<style>` elements.
+fn extract_css(doc: &aerova_dom::Document) -> String {
+    fn walk(n: &aerova_dom::Node, out: &mut String) {
+        match n {
+            aerova_dom::Node::Text(_) => {}
+            aerova_dom::Node::Element { tag, children, .. } => {
+                if tag == "style" {
+                    for c in children {
+                        if let aerova_dom::Node::Text(t) = c {
+                            out.push_str(t);
+                            out.push('\n');
+                        }
+                    }
+                } else {
+                    for c in children {
+                        walk(c, out);
+                    }
+                }
+            }
+        }
+    }
+    let mut s = String::new();
+    for n in &doc.nodes {
+        walk(n, &mut s);
+    }
+    s
+}
+
+fn visible_text(doc: &aerova_dom::Document) -> String {
+    fn walk(n: &aerova_dom::Node, out: &mut String) {
+        match n {
+            aerova_dom::Node::Text(t) => {
+                out.push_str(t);
+                out.push(' ');
+            }
+            aerova_dom::Node::Element { tag, children, .. } => {
+                if tag == "style" || tag == "title" || tag == "head" {
+                    return;
+                }
+                for c in children {
+                    walk(c, out);
+                }
+            }
+        }
+    }
+    let mut s = String::new();
+    for n in &doc.nodes {
+        walk(n, &mut s);
+    }
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn paint_tree(fb: &mut aerova_paint::Framebuffer, b: &aerova_layout::BoxNode) {
+    if let Some(bg) = b.background() {
+        if let Some(rgb) = aerova_paint::parse_color(bg) {
+            if b.w > 0 && b.h > 0 {
+                fb.rect(b.x, b.y, b.w, b.h.min(600), rgb);
+            }
+        }
+    } else if b.kind == "#text" {
+        fb.rect(b.x, b.y, b.w.min(800), 2, (220, 220, 220));
+    }
+    for c in &b.children {
+        paint_tree(fb, c);
+    }
+}
+
+/// Render HTML text to text + boxes + framebuffer.
 #[must_use]
 pub fn render_text(
     html: &str,
@@ -16,11 +83,14 @@ pub fn render_text(
     aerova_paint::Framebuffer,
 ) {
     let doc = aerova_html::parse(html);
-    let text = doc.text();
-    let boxes = aerova_layout::layout(&doc);
+    let text = visible_text(&doc);
+    let css_text = extract_css(&doc);
+    let rules = aerova_css::parse(&css_text);
+    let boxes = aerova_layout::layout(&doc, &rules);
     let mut fb = aerova_paint::Framebuffer::new(800, 600);
-    fb.rect(0, 0, 800, 40, (230, 240, 250));
-    let _css = aerova_css::parse("p { color: black; }");
+    for b in &boxes {
+        paint_tree(&mut fb, b);
+    }
     (text, boxes, fb)
 }
 
@@ -107,6 +177,19 @@ mod tests {
         let (text, _, fb) = render_text("<p>hi</p>");
         assert_eq!(text, "hi");
         assert_eq!((fb.width, fb.height), (800, 600));
+    }
+
+    #[test]
+    fn styled_background_paints() {
+        let html = "<style>div { background: red; height: 40px; }</style><div>hi</div>";
+        let (text, boxes, fb) = render_text(html);
+        assert!(text.contains("hi"));
+        assert!(!boxes.is_empty());
+        // Box with red background exists and top-left of its rect is red.
+        let div_box = boxes.iter().find(|b| b.kind == "div").unwrap();
+        assert_eq!(div_box.h, 40);
+        let i = ((div_box.y * 800 + div_box.x) as usize) * 4;
+        assert_eq!(&fb.pixels[i..i + 3], &[255, 0, 0]);
     }
 
     #[test]
