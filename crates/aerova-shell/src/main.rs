@@ -133,7 +133,7 @@ fn main() {
         }
         "js" => {
             let code = args[1..].join(" ");
-            match aerova_js::eval_stub(&code) {
+            match aerova_js::eval(&code) {
                 Ok(v) => println!("{v}"),
                 Err(e) => {
                     eprintln!("{e}");
