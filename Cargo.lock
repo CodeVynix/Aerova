@@ -53,7 +53,10 @@ dependencies = [
 
 [[package]]
 name = "aerova-lumora"
-version = "0.1.0"
+version = "0.2.0"
+dependencies = [
+ "aerova-paint",
+]
 
 [[package]]
 name = "aerova-net"
@@ -76,6 +79,7 @@ version = "0.1.0"
 dependencies = [
  "aerova-engine",
  "aerova-js",
+ "aerova-lumora",
  "aerova-search",
 ]
 

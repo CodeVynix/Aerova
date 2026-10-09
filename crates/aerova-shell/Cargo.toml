@@ -11,3 +11,4 @@ path = "src/main.rs"
 aerova-engine = { path = "../aerova-engine" }
 aerova-search = { path = "../aerova-search" }
 aerova-js = { path = "../aerova-js" }
+aerova-lumora = { path = "../aerova-lumora" }

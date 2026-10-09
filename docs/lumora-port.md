@@ -1,8 +1,10 @@
-# Lumora port
+# Lumora port (contract frozen)
 
-Blocked on Lumora PROJECT.md steps 11-13: NIC/TCP-IP/DNS/TLS, libc/POSIX (threads, mmap, sockets, poll), GPU/compositor.
+Engine renders RGBA `Framebuffer` on Linux/Windows today. Lumora implements `BlitTarget`.
 
-Aerova needs only: files, sockets, threads, mmap, blit, fonts.
-Chromium/Firefox need: full POSIX + NSS + Skia + V8 + sandbox + GPU + build toolchain port.
+- `aerova-lumora::BlitTarget`: `size()` + `blit_rgba(dx,dy,w,h,bytes)` with clipping.
+- `MemorySurface`: test double used by `aerova lumora-blit`.
+- `blit_framebuffer(src, dst, dx, dy)`: what `engine` calls; no code change when OS swaps in.
+- `blit_to_raw_framebuffer(ptr, w, h, pitch, src, dx, dy)`: unsafe VRAM helper with `// SAFETY:` per Lumora rules. Assumes 32bpp; driver swizzles if XRGB/BGRA.
 
-Strategy: finish native Linux/Windows CLI render first, then swap `aerova-shell` winit/wgpu for `lumora-ui` + compositor blit. Keep engine std-only.
+Still gated on Lumora OS: libc/POSIX (threads, mmap, sockets, poll), NIC/TCP-IP/DNS/TLS, framebuffer driver + compositor + `lumora-ui` fonts. Chromium/Firefox need all that plus NSS/Skia/V8; Aerova needs only blit + sockets + files.

@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 fn usage() -> &'static str {
-    "usage: aerova <open <url|file> [--shot out.ppm] | crawl <url>... [--db FILE] | search <query> [--db FILE] | tabs demo | js <code> | home>"
+    "usage: aerova <open <url|file> [--shot out.ppm] | crawl <url>... [--db FILE] | search <query> [--db FILE] | tabs demo | lumora-blit [url] [--shot FILE] | js <code> | home>"
 }
 
 fn parse_db(args: &[String]) -> Option<PathBuf> {
@@ -144,6 +144,45 @@ fn main() {
                 }
             }
             let _ = (a, b);
+        }
+        "lumora-blit" => {
+            let mut url = "aerova://home".to_string();
+            let mut shot: Option<std::path::PathBuf> = None;
+            let mut i = 1;
+            while i < args.len() {
+                if args[i] == "--shot" && i + 1 < args.len() {
+                    shot = Some(std::path::PathBuf::from(&args[i + 1]));
+                    i += 2;
+                } else {
+                    url = args[i].clone();
+                    i += 1;
+                }
+            }
+            let policy = aerova_engine::IsolationPolicy::per_tab_thread();
+            match aerova_engine::render_isolated(&url, &policy) {
+                Ok((text, fb)) => {
+                    let mut surf = aerova_lumora::MemorySurface::new(fb.width, fb.height);
+                    aerova_lumora::blit_framebuffer(&fb, &mut surf, 0, 0);
+                    println!("{text}");
+                    eprintln!(
+                        "lumora blit {}x{} via {}",
+                        fb.width,
+                        fb.height,
+                        aerova_lumora::status()
+                    );
+                    if let Some(p) = shot {
+                        surf.to_framebuffer().save_ppm(&p).unwrap_or_else(|e| {
+                            eprintln!("shot failed: {e}");
+                            std::process::exit(1);
+                        });
+                        eprintln!("saved {}", p.display());
+                    }
+                }
+                Err(e) => {
+                    eprintln!("lumora-blit failed: {e}");
+                    std::process::exit(1);
+                }
+            }
         }
         "js" => {
             let code = args[1..].join(" ");
