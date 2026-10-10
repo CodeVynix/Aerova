@@ -98,7 +98,7 @@ fn layout_node(n: &Node, x: u32, y: &mut u32, rules: &[Rule]) -> BoxNode {
             let mut kids = Vec::new();
             for c in children {
                 // Skip style/title/head content from visual flow.
-                if tag == "style" || tag == "title" || tag == "head" {
+                if tag == "style" || tag == "title" || tag == "head" || tag == "script" {
                     continue;
                 }
                 kids.push(layout_node(c, x + 10, y, rules));

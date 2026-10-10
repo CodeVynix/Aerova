@@ -23,6 +23,7 @@ dependencies = [
  "aerova-css",
  "aerova-dom",
  "aerova-html",
+ "aerova-js",
  "aerova-layout",
  "aerova-net",
  "aerova-paint",

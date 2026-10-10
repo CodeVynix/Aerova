@@ -185,6 +185,38 @@ fn extract_css(doc: &aerova_dom::Document) -> String {
     s
 }
 
+/// Collect inline `<script>` bodies in document order (ignores `src` for now).
+fn extract_scripts(doc: &aerova_dom::Document) -> Vec<String> {
+    fn walk(n: &aerova_dom::Node, out: &mut Vec<String>) {
+        match n {
+            aerova_dom::Node::Text(_) => {}
+            aerova_dom::Node::Element { tag, children, .. } => {
+                if tag == "script" {
+                    let mut s = String::new();
+                    for c in children {
+                        if let aerova_dom::Node::Text(tt) = c {
+                            s.push_str(tt);
+                            s.push('\n');
+                        }
+                    }
+                    if !s.trim().is_empty() {
+                        out.push(s);
+                    }
+                } else {
+                    for c in children {
+                        walk(c, out);
+                    }
+                }
+            }
+        }
+    }
+    let mut v = Vec::new();
+    for n in &doc.nodes {
+        walk(n, &mut v);
+    }
+    v
+}
+
 fn visible_text(doc: &aerova_dom::Document) -> String {
     fn walk(n: &aerova_dom::Node, out: &mut String) {
         match n {
@@ -193,7 +225,7 @@ fn visible_text(doc: &aerova_dom::Document) -> String {
                 out.push(' ');
             }
             aerova_dom::Node::Element { tag, children, .. } => {
-                if tag == "style" || tag == "title" || tag == "head" {
+                if tag == "style" || tag == "title" || tag == "head" || tag == "script" {
                     return;
                 }
                 for c in children {
@@ -234,9 +266,23 @@ pub fn render_text(
     aerova_paint::Framebuffer,
 ) {
     let doc = aerova_html::parse(html);
-    let text = visible_text(&doc);
+    let mut text = visible_text(&doc);
     let css_text = extract_css(&doc);
     let rules = aerova_css::parse(&css_text);
+    let scripts = extract_scripts(&doc);
+    if !scripts.is_empty() {
+        let mut title: Option<String> = None;
+        for n in &doc.nodes {
+            find_title(n, &mut title);
+        }
+        let out = aerova_js::run_scripts(&scripts, title.as_deref().unwrap_or(""));
+        for w in &out.writes {
+            if !text.is_empty() {
+                text.push(' ');
+            }
+            text.push_str(w);
+        }
+    }
     let boxes = aerova_layout::layout(&doc, &rules);
     let mut fb = aerova_paint::Framebuffer::new(800, 600);
     for b in &boxes {
@@ -359,6 +405,13 @@ mod tests {
         assert_eq!(div_box.h, 40);
         let i = ((div_box.y * 800 + div_box.x) as usize) * 4;
         assert_eq!(&fb.pixels[i..i + 3], &[255, 0, 0]);
+    }
+
+    #[test]
+    fn script_write_appends_text() {
+        let (text, _, _) = render_text("<p>base</p><script>document.write('injected');</script>");
+        assert!(text.contains("base"));
+        assert!(text.contains("injected"));
     }
 
     #[test]
