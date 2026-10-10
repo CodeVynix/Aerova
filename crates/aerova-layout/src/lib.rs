@@ -1,4 +1,4 @@
-//! Aerova layout: block stacking + flex row/column (Phase 7).
+//! Aerova layout: block stacking + flex row/column with class/id styles.
 //! Grid later.
 
 use aerova_css::{parse_px, specified_styles, Rule};
@@ -53,7 +53,6 @@ pub fn layout(doc: &Document, rules: &[Rule]) -> Vec<BoxNode> {
     let mut y = 0;
     let mut out = Vec::new();
     for n in &doc.nodes {
-        // Skip head/style/title/script at top level (not visual).
         if let Node::Element { tag, .. } = n {
             if tag == "style" || tag == "title" || tag == "head" || tag == "script" {
                 continue;
@@ -64,8 +63,10 @@ pub fn layout(doc: &Document, rules: &[Rule]) -> Vec<BoxNode> {
     out
 }
 
-fn styled_height(tag: &str, rules: &[Rule]) -> Option<u32> {
-    for (k, v) in specified_styles(tag, rules) {
+type Attrs = Vec<(String, String)>;
+
+fn styled_height(tag: &str, attrs: &Attrs, rules: &[Rule]) -> Option<u32> {
+    for (k, v) in specified_styles(tag, attrs, rules) {
         if k == "height" {
             if let Some(px) = parse_px(&v) {
                 return Some(px);
@@ -75,8 +76,8 @@ fn styled_height(tag: &str, rules: &[Rule]) -> Option<u32> {
     None
 }
 
-fn has_width_decl(tag: &str, rules: &[Rule]) -> Option<u32> {
-    for (k, v) in specified_styles(tag, rules) {
+fn has_width_decl(tag: &str, attrs: &Attrs, rules: &[Rule]) -> Option<u32> {
+    for (k, v) in specified_styles(tag, attrs, rules) {
         if k == "width" {
             if let Some(px) = parse_px(&v) {
                 return Some(px);
@@ -86,22 +87,22 @@ fn has_width_decl(tag: &str, rules: &[Rule]) -> Option<u32> {
     None
 }
 
-fn styled_width(tag: &str, x: u32, rules: &[Rule]) -> u32 {
+fn styled_width(tag: &str, attrs: &Attrs, x: u32, rules: &[Rule]) -> u32 {
     let base = 800u32.saturating_sub(x);
-    if let Some(px) = has_width_decl(tag, rules) {
+    if let Some(px) = has_width_decl(tag, attrs, rules) {
         return px.min(base);
     }
     base
 }
 
-fn is_flex_tag(tag: &str, rules: &[Rule]) -> bool {
-    specified_styles(tag, rules)
+fn is_flex_tag(tag: &str, attrs: &Attrs, rules: &[Rule]) -> bool {
+    specified_styles(tag, attrs, rules)
         .iter()
         .any(|(k, v)| k == "display" && v == "flex")
 }
 
-fn flex_direction(tag: &str, rules: &[Rule]) -> &'static str {
-    for (k, v) in specified_styles(tag, rules) {
+fn flex_direction(tag: &str, attrs: &Attrs, rules: &[Rule]) -> &'static str {
+    for (k, v) in specified_styles(tag, attrs, rules) {
         if k == "flex-direction" {
             if v == "column" {
                 return "column";
@@ -130,7 +131,11 @@ fn layout_node(n: &Node, x: u32, y: &mut u32, rules: &[Rule]) -> BoxNode {
             let _ = t;
             b
         }
-        Node::Element { tag, children, .. } => {
+        Node::Element {
+            tag,
+            attrs,
+            children,
+        } => {
             if tag == "style" || tag == "title" || tag == "head" || tag == "script" {
                 return BoxNode {
                     kind: tag.clone(),
@@ -138,19 +143,18 @@ fn layout_node(n: &Node, x: u32, y: &mut u32, rules: &[Rule]) -> BoxNode {
                     y: *y,
                     w: 0,
                     h: 0,
-                    style: specified_styles(tag, rules),
+                    style: specified_styles(tag, attrs, rules),
                     children: vec![],
                 };
             }
-            if is_flex_tag(tag, rules) && flex_direction(tag, rules) == "row" {
-                return layout_flex_row(tag, children, x, y, rules);
+            if is_flex_tag(tag, attrs, rules) && flex_direction(tag, attrs, rules) == "row" {
+                return layout_flex_row(tag, attrs, children, x, y, rules);
             }
             let start = *y;
-            let style = specified_styles(tag, rules);
-            let w = styled_width(tag, x, rules);
+            let style = specified_styles(tag, attrs, rules);
+            let w = styled_width(tag, attrs, x, rules);
             let mut kids = Vec::new();
             for c in children {
-                // Skip non-visual elements inside flow.
                 if let Node::Element { tag: ct, .. } = c {
                     if ct == "style" || ct == "title" || ct == "head" || ct == "script" {
                         continue;
@@ -159,7 +163,7 @@ fn layout_node(n: &Node, x: u32, y: &mut u32, rules: &[Rule]) -> BoxNode {
                 kids.push(layout_node(c, x + 10, y, rules));
             }
             let content_h = *y - start;
-            let wanted = styled_height(tag, rules).unwrap_or(0);
+            let wanted = styled_height(tag, attrs, rules).unwrap_or(0);
             let h = content_h.max(if kids.is_empty() {
                 wanted.max(20)
             } else {
@@ -182,12 +186,17 @@ fn layout_node(n: &Node, x: u32, y: &mut u32, rules: &[Rule]) -> BoxNode {
 }
 
 /// Flex row: children share one line, x advances, y stays at row top.
-/// Unspecified child widths split the remaining space equally.
-fn layout_flex_row(tag: &str, children: &[Node], x: u32, y: &mut u32, rules: &[Rule]) -> BoxNode {
+fn layout_flex_row(
+    tag: &str,
+    attrs: &Attrs,
+    children: &[Node],
+    x: u32,
+    y: &mut u32,
+    rules: &[Rule],
+) -> BoxNode {
     let start_y = *y;
-    let style = specified_styles(tag, rules);
-    let w = styled_width(tag, x, rules);
-    // Collect visual children only.
+    let style = specified_styles(tag, attrs, rules);
+    let w = styled_width(tag, attrs, x, rules);
     let visual: Vec<&Node> = children
         .iter()
         .filter(|c| match c {
@@ -203,16 +212,16 @@ fn layout_flex_row(tag: &str, children: &[Node], x: u32, y: &mut u32, rules: &[R
     let mut cx = x;
     let mut max_h = 0;
     for c in visual {
-        // Fixed width for this item if its own tag declares one.
         let item_w = match c {
             Node::Text(_) => share,
-            Node::Element { tag: ct, .. } => has_width_decl(ct, rules)
+            Node::Element {
+                tag: ct, attrs: ca, ..
+            } => has_width_decl(ct, ca, rules)
                 .unwrap_or(share)
                 .min(w.saturating_sub(cx - x)),
         };
         let mut row_y = start_y;
         let mut item = layout_flex_item(c, cx, &mut row_y, item_w, rules);
-        // Force item into row slot.
         item.x = cx;
         item.y = start_y;
         if item.w == 0 || item.w > item_w {
@@ -222,7 +231,7 @@ fn layout_flex_row(tag: &str, children: &[Node], x: u32, y: &mut u32, rules: &[R
         kids.push(item);
         cx += item_w;
     }
-    let wanted = styled_height(tag, rules).unwrap_or(0);
+    let wanted = styled_height(tag, attrs, rules).unwrap_or(0);
     let h = max_h.max(wanted).max(if kids.is_empty() { 20 } else { 0 });
     *y = start_y + h;
     BoxNode {
@@ -236,7 +245,6 @@ fn layout_flex_row(tag: &str, children: &[Node], x: u32, y: &mut u32, rules: &[R
     }
 }
 
-/// Lay out a single flex item with a capped width, without advancing outer `y`.
 fn layout_flex_item(n: &Node, x: u32, _row_y: &mut u32, cap_w: u32, rules: &[Rule]) -> BoxNode {
     match n {
         Node::Text(_) => BoxNode {
@@ -248,8 +256,12 @@ fn layout_flex_item(n: &Node, x: u32, _row_y: &mut u32, cap_w: u32, rules: &[Rul
             style: Vec::new(),
             children: vec![],
         },
-        Node::Element { tag, children, .. } => {
-            let style = specified_styles(tag, rules);
+        Node::Element {
+            tag,
+            attrs,
+            children,
+        } => {
+            let style = specified_styles(tag, attrs, rules);
             let mut inner_y = 0;
             let mut kids = Vec::new();
             for c in children {
@@ -261,13 +273,15 @@ fn layout_flex_item(n: &Node, x: u32, _row_y: &mut u32, cap_w: u32, rules: &[Rul
                 kids.push(layout_node(c, 0, &mut inner_y, rules));
             }
             let content_h = inner_y;
-            let wanted = styled_height(tag, rules).unwrap_or(0);
+            let wanted = styled_height(tag, attrs, rules).unwrap_or(0);
             let h = content_h.max(if kids.is_empty() {
                 wanted.max(20)
             } else {
                 wanted
             });
-            let w = has_width_decl(tag, rules).unwrap_or(cap_w).min(cap_w);
+            let w = has_width_decl(tag, attrs, rules)
+                .unwrap_or(cap_w)
+                .min(cap_w);
             BoxNode {
                 kind: tag.clone(),
                 x,
@@ -376,5 +390,31 @@ mod tests {
         let boxes = layout(&doc, &rules);
         let row = &boxes[0];
         assert!(row.children[1].y >= row.children[0].y);
+    }
+
+    #[test]
+    fn class_flex_applies() {
+        let doc = Document {
+            nodes: vec![Node::Element {
+                tag: "div".into(),
+                attrs: vec![("class".to_string(), "row".to_string())],
+                children: vec![
+                    Node::Element {
+                        tag: "span".into(),
+                        attrs: vec![],
+                        children: vec![Node::Text("a".into())],
+                    },
+                    Node::Element {
+                        tag: "span".into(),
+                        attrs: vec![],
+                        children: vec![Node::Text("b".into())],
+                    },
+                ],
+            }],
+        };
+        let rules = aerova_css::parse(".row { display: flex; }");
+        let boxes = layout(&doc, &rules);
+        assert!(boxes[0].is_flex());
+        assert_eq!(boxes[0].children[0].y, boxes[0].children[1].y);
     }
 }
