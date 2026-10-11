@@ -1,5 +1,6 @@
 //! Aerova JS: stub by default, Boa engine behind `boa` feature.
-//! Phase 6b adds `document.write` / `console.log` bindings + `run_scripts`.
+//! Phase 6c adds DOM query (`getElementById`/`querySelector(All)`),
+//! timers (`setTimeout` immediate v1) and events (`addEventListener`, fired after script).
 //! Default keeps Lumora port std-only; `--features boa` gives real JS.
 
 use std::cell::RefCell;
@@ -8,27 +9,73 @@ thread_local! {
     static STUB_WRITES: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
 }
 
-/// Evaluate JS source with stub (integers `1+2` only).
+/// One queryable DOM element snapshot for bindings.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DomEl {
+    /// Lowercased tag.
+    pub tag: String,
+    /// Raw id (may be empty).
+    pub id: String,
+    /// Lowercased class list.
+    pub classes: Vec<String>,
+    /// Visible text inside the element.
+    pub text: String,
+}
+
+#[cfg(feature = "boa")]
+fn escape_json(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+#[cfg(feature = "boa")]
+fn dom_to_json(dom: &[DomEl]) -> String {
+    let mut out = String::from("[");
+    for (i, e) in dom.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push_str(&format!(
+            "{{\"tag\":\"{}\",\"id\":\"{}\",\"classes\":[{}],\"text\":\"{}\"}}",
+            escape_json(&e.tag),
+            escape_json(&e.id),
+            e.classes
+                .iter()
+                .map(|c| format!("\"{}\"", escape_json(c)))
+                .collect::<Vec<_>>()
+                .join(","),
+            escape_json(&e.text),
+        ));
+    }
+    out.push(']');
+    out
+}
+
+/// Evaluate JS source with stub (integers `1+2` or `document.write` scan).
 pub fn eval_stub(source: &str) -> Result<String, String> {
     let s = source.trim().trim_end_matches(';').trim();
     if let Some((a, b)) = s.split_once('+') {
-        // Only treat as addition when both sides look like plain integers.
-        // Otherwise fall through to document.write scan below.
-        let a_trim = a.trim();
-        let b_trim = b.trim();
-        let a_clean = a_trim.trim_matches('"').trim_matches('\'');
-        let b_clean = b_trim.trim_matches('"').trim_matches('\'');
-        let a_is_int = !a_clean.is_empty()
-            && (a_clean.bytes().all(|c| c.is_ascii_digit())
-                || (a_clean.starts_with('-')
-                    && a_clean.len() > 1
-                    && a_clean[1..].bytes().all(|c| c.is_ascii_digit())));
-        let b_is_int = !b_clean.is_empty()
-            && (b_clean.bytes().all(|c| c.is_ascii_digit())
-                || (b_clean.starts_with('-')
-                    && b_clean.len() > 1
-                    && b_clean[1..].bytes().all(|c| c.is_ascii_digit())));
-        if a_is_int && b_is_int {
+        let a_clean = a.trim().trim_matches('"').trim_matches('\'');
+        let b_clean = b.trim().trim_matches('"').trim_matches('\'');
+        let int_like = |v: &str| {
+            !v.is_empty()
+                && (v.bytes().all(|c| c.is_ascii_digit())
+                    || (v.starts_with('-')
+                        && v.len() > 1
+                        && v[1..].bytes().all(|c| c.is_ascii_digit())))
+        };
+        if int_like(a_clean) && int_like(b_clean) {
             let x: i64 = a_clean
                 .parse()
                 .map_err(|_| "js-stub: left is not int".to_string())?;
@@ -38,7 +85,6 @@ pub fn eval_stub(source: &str) -> Result<String, String> {
             return Ok((x + y).to_string());
         }
     }
-    // Fall back to write-scan so `<script>document.write('hi')</script>` works without Boa.
     let writes = scan_writes(source);
     if !writes.is_empty() {
         STUB_WRITES.with(|w| w.borrow_mut().extend(writes.clone()));
@@ -94,7 +140,7 @@ fn scan_writes(source: &str) -> Vec<String> {
 
 #[cfg(feature = "boa")]
 mod boa_impl {
-    use super::STUB_WRITES;
+    use super::{dom_to_json, DomEl, STUB_WRITES};
     use boa_engine::{
         js_string, native_function::NativeFunction, Context, JsResult, JsValue, Source,
     };
@@ -141,39 +187,73 @@ mod boa_impl {
         }
     }
 
-    /// Install `document`/`console`/`window` via JS so we avoid typed-key API churn.
-    fn install_bindings(ctx: &mut Context, title: &str) -> Result<(), String> {
-        ctx.register_global_callable(
-            js_string!("__aerova_write"),
-            1,
-            NativeFunction::from_fn_ptr(document_write),
-        )
-        .map_err(|e| format!("boa-bind: {e}"))?;
-        ctx.register_global_callable(
-            js_string!("__aerova_log"),
-            1,
-            NativeFunction::from_fn_ptr(console_log),
-        )
-        .map_err(|e| format!("boa-bind: {e}"))?;
-        let setup = format!(
-            "var document = {{ title: {:?}, write: __aerova_write }}; var window = globalThis; var console = {{ log: __aerova_log }};",
-            title
-        );
-        ctx.eval(Source::from_bytes(setup.as_str()))
-            .map_err(|e| format!("boa-bind: {e}"))?;
-        Ok(())
-    }
+    const SHIM: &str = r##"
+function __match(e, sel) {
+  if (sel === "*") return true;
+  if (sel[0] === "#") return e.id === sel.slice(1);
+  if (sel[0] === ".") {
+    var parts = sel.slice(1).split(".");
+    for (var i = 0; i < parts.length; i++) if (e.classes.indexOf(parts[i]) < 0) return false;
+    return true;
+  }
+  var hi = sel.indexOf("#");
+  if (hi > 0) return e.tag === sel.slice(0, hi) && e.id === sel.slice(hi + 1);
+  var di = sel.indexOf(".");
+  if (di > 0) {
+    var t = sel.slice(0, di), cs = sel.slice(di + 1).split(".");
+    if (e.tag !== t) return false;
+    for (var j = 0; j < cs.length; j++) if (e.classes.indexOf(cs[j]) < 0) return false;
+    return true;
+  }
+  return e.tag === sel;
+}
+function __wrap(e) { return e ? { tag: e.tag, id: e.id, textContent: e.text } : null; }
+var __timerId = 1;
+var __timers = [];
+var __listeners = [];
+"##;
 
-    /// Run script with `document`/`console`/`window` bindings.
-    /// Returns `(result, writes, logs)`.
+    /// JS run after the main script: fires timers then listeners, isolated per callback.
+    const FIRE: &str = r##"
+__timers.forEach(function(t) { try { if (typeof t.fn === 'function') { t.fn(); } else { eval(t.fn); } } catch (e) {} });
+__timers = [];
+__listeners.forEach(function(l) { try { if (typeof l.fn === 'function') { l.fn(); } else { eval(l.fn); } } catch (e) {} });
+"##;
+
+    /// Install bindings + DOM snapshot, then eval main script, timers, listeners.
     pub fn run_with_bindings(
         source: &str,
         title: &str,
+        dom: &[DomEl],
     ) -> (Result<String, String>, Vec<String>, Vec<String>) {
         WRITES.with(|w| w.borrow_mut().clear());
         LOGS.with(|l| l.borrow_mut().clear());
         let mut ctx = Context::default();
-        if let Err(e) = install_bindings(&mut ctx, title) {
+        let setup = |ctx: &mut Context| -> Result<(), String> {
+            ctx.register_global_callable(
+                js_string!("__aerova_write"),
+                1,
+                NativeFunction::from_fn_ptr(document_write),
+            )
+            .map_err(|e| format!("boa-bind: {e}"))?;
+            ctx.register_global_callable(
+                js_string!("__aerova_log"),
+                1,
+                NativeFunction::from_fn_ptr(console_log),
+            )
+            .map_err(|e| format!("boa-bind: {e}"))?;
+            let setup_src = format!(
+                "var __DOM = {}; var __TITLE = {:?};\nvar document = {{ title: __TITLE, write: __aerova_write, getElementById: function(id) {{ var e = null; for (var i = 0; i < __DOM.length; i++) if (__DOM[i].id === id) {{ e = __DOM[i]; break; }} return __wrap(e); }}, querySelector: function(sel) {{ for (var i = 0; i < __DOM.length; i++) if (__match(__DOM[i], sel)) return __wrap(__DOM[i]); return null; }}, querySelectorAll: function(sel) {{ var out = []; for (var i = 0; i < __DOM.length; i++) if (__match(__DOM[i], sel)) out.push({{ tag: __DOM[i].tag, id: __DOM[i].id, textContent: __DOM[i].text }}); return out; }}, addEventListener: function(t, fn) {{ __listeners.push({{t: t, fn: fn}}); }} }}; var window = globalThis; var console = {{ log: __aerova_log }}; function setTimeout(fn, ms) {{ var id = __timerId++; __timers.push({{fn: fn, ms: ms || 0}}); return id; }};",
+                dom_to_json(dom),
+                title,
+            );
+            ctx.eval(Source::from_bytes(setup_src.as_str()))
+                .map_err(|e| format!("boa-bind: {e}"))?;
+            ctx.eval(Source::from_bytes(SHIM))
+                .map_err(|e| format!("boa-bind: {e}"))?;
+            Ok(())
+        };
+        if let Err(e) = setup(&mut ctx) {
             return (Err(e), vec![], vec![]);
         }
         let result = match ctx.eval(Source::from_bytes(source)) {
@@ -183,9 +263,11 @@ mod boa_impl {
                 .map_err(|e| format!("boa-stringify: {e}")),
             Err(e) => Err(format!("boa-eval: {e}")),
         };
+        // Fire timers in order (v1 ignores delay), then all listeners.
+        // Callbacks live in the JS heap, so no Rust-side function storage is needed.
+        let _ = ctx.eval(Source::from_bytes(FIRE));
         let writes = WRITES.with(|w| std::mem::take(&mut *w.borrow_mut()));
         let logs = LOGS.with(|l| std::mem::take(&mut *l.borrow_mut()));
-        // Mirror Boa writes into stub store so mixed callers see them.
         STUB_WRITES.with(|w| w.borrow_mut().extend(writes.clone()));
         (result, writes, logs)
     }
@@ -210,12 +292,11 @@ pub struct ScriptOutput {
     pub failed: bool,
 }
 
-/// Run one script with `document`/`console` bindings, capturing writes.
-/// Works with and without `boa`: stub scans `document.write`, Boa really runs JS.
-pub fn run_script(source: &str, title: &str) -> ScriptOutput {
+/// Run one script with bindings and DOM snapshot.
+pub fn run_script_with_dom(source: &str, title: &str, dom: &[DomEl]) -> ScriptOutput {
     #[cfg(feature = "boa")]
     {
-        let (r, writes, logs) = boa_impl::run_with_bindings(source, title);
+        let (r, writes, logs) = boa_impl::run_with_bindings(source, title, dom);
         match r {
             Ok(v) => ScriptOutput {
                 result: v,
@@ -233,7 +314,7 @@ pub fn run_script(source: &str, title: &str) -> ScriptOutput {
     }
     #[cfg(not(feature = "boa"))]
     {
-        let _ = title;
+        let _ = (title, dom);
         let writes = scan_writes(source);
         if writes.is_empty() {
             match eval_stub(source) {
@@ -261,15 +342,20 @@ pub fn run_script(source: &str, title: &str) -> ScriptOutput {
     }
 }
 
-/// Run many scripts in order, concatenating writes/logs.
+/// Run one script with `document`/`console` bindings, capturing writes.
+pub fn run_script(source: &str, title: &str) -> ScriptOutput {
+    run_script_with_dom(source, title, &[])
+}
+
+/// Run many scripts in order with DOM snapshot, concatenating writes/logs.
 #[must_use]
-pub fn run_scripts(sources: &[String], title: &str) -> ScriptOutput {
+pub fn run_scripts_with_dom(sources: &[String], title: &str, dom: &[DomEl]) -> ScriptOutput {
     let mut all_writes = Vec::new();
     let mut all_logs = Vec::new();
     let mut last = String::new();
     let mut failed = false;
     for s in sources {
-        let o = run_script(s, title);
+        let o = run_script_with_dom(s, title, dom);
         if !o.result.is_empty() {
             last = o.result.clone();
         }
@@ -287,6 +373,12 @@ pub fn run_scripts(sources: &[String], title: &str) -> ScriptOutput {
     }
 }
 
+/// Run many scripts in order, concatenating writes/logs.
+#[must_use]
+pub fn run_scripts(sources: &[String], title: &str) -> ScriptOutput {
+    run_scripts_with_dom(sources, title, &[])
+}
+
 /// Unified eval: Boa when `boa` feature is on, else stub.
 pub fn eval(source: &str) -> Result<String, String> {
     #[cfg(feature = "boa")]
@@ -302,6 +394,24 @@ pub fn eval(source: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "boa")]
+    fn fixture_dom() -> Vec<DomEl> {
+        vec![
+            DomEl {
+                tag: "div".into(),
+                id: "main".into(),
+                classes: vec!["row".into()],
+                text: "hello box".into(),
+            },
+            DomEl {
+                tag: "span".into(),
+                id: "".into(),
+                classes: vec!["row".into()],
+                text: "side note".into(),
+            },
+        ]
+    }
 
     #[test]
     fn adds() {
@@ -337,9 +447,36 @@ mod tests {
         let (r, writes, logs) = boa_impl::run_with_bindings(
             "document.write(document.title + '!'); console.log('a','b');",
             "Page",
+            &[],
         );
         assert!(r.is_ok());
         assert_eq!(writes, vec!["Page!".to_string()]);
         assert_eq!(logs, vec!["a b".to_string()]);
+    }
+
+    #[cfg(feature = "boa")]
+    #[test]
+    fn boa_queries_dom() {
+        let dom = fixture_dom();
+        let (r, writes, _) = boa_impl::run_with_bindings(
+            "document.write(document.getElementById('main').textContent + '|' + document.querySelector('.row').textContent + '|' + document.querySelectorAll('span').length);",
+            "T",
+            &dom,
+        );
+        assert!(r.is_ok());
+        assert_eq!(writes, vec!["hello box|hello box|1".to_string()]);
+    }
+
+    #[cfg(feature = "boa")]
+    #[test]
+    fn boa_timers_and_listeners_fire() {
+        let (r, writes, _) = boa_impl::run_with_bindings(
+            "setTimeout(function(){ document.write('later'); }, 10); document.addEventListener('click', function(){ document.write('clicked'); });",
+            "T",
+            &[],
+        );
+        assert!(r.is_ok());
+        assert!(writes.contains(&"later".to_string()));
+        assert!(writes.contains(&"clicked".to_string()));
     }
 }

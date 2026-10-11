@@ -241,6 +241,65 @@ fn visible_text(doc: &aerova_dom::Document) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+fn element_text(n: &aerova_dom::Node, out: &mut String) {
+    match n {
+        aerova_dom::Node::Text(t) => {
+            out.push_str(t);
+            out.push(' ');
+        }
+        aerova_dom::Node::Element { children, .. } => {
+            for c in children {
+                element_text(c, out);
+            }
+        }
+    }
+}
+
+/// Snapshot queryable elements for JS bindings (skips style/script/head/title).
+fn dom_snapshot(doc: &aerova_dom::Document) -> Vec<aerova_js::DomEl> {
+    fn walk(n: &aerova_dom::Node, out: &mut Vec<aerova_js::DomEl>) {
+        match n {
+            aerova_dom::Node::Text(_) => {}
+            aerova_dom::Node::Element {
+                tag,
+                attrs,
+                children,
+            } => {
+                if tag == "style" || tag == "script" || tag == "head" || tag == "title" {
+                    return;
+                }
+                let mut text = String::new();
+                element_text(n, &mut text);
+                let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+                let id = attrs
+                    .iter()
+                    .find(|(k, _)| k == "id")
+                    .map_or("", |(_, v)| v.as_str())
+                    .to_string();
+                let classes: Vec<String> = attrs
+                    .iter()
+                    .find(|(k, _)| k == "class")
+                    .map(|(_, v)| v.split_whitespace().map(|w| w.to_lowercase()).collect())
+                    .unwrap_or_default();
+                out.push(aerova_js::DomEl {
+                    tag: tag.to_lowercase(),
+                    id,
+                    classes,
+                    text,
+                });
+                for c in children {
+                    walk(c, out);
+                }
+            }
+        }
+    }
+    let mut v = Vec::new();
+    for n in &doc.nodes {
+        walk(n, &mut v);
+    }
+    v
+}
+
 fn paint_tree(fb: &mut aerova_paint::Framebuffer, b: &aerova_layout::BoxNode) {
     if let Some(bg) = b.background() {
         if let Some(rgb) = aerova_paint::parse_color(bg) {
@@ -275,7 +334,8 @@ pub fn render_text(
         for n in &doc.nodes {
             find_title(n, &mut title);
         }
-        let out = aerova_js::run_scripts(&scripts, title.as_deref().unwrap_or(""));
+        let dom = dom_snapshot(&doc);
+        let out = aerova_js::run_scripts_with_dom(&scripts, title.as_deref().unwrap_or(""), &dom);
         for w in &out.writes {
             if !text.is_empty() {
                 text.push(' ');
@@ -412,6 +472,14 @@ mod tests {
         let (text, _, _) = render_text("<p>base</p><script>document.write('injected');</script>");
         assert!(text.contains("base"));
         assert!(text.contains("injected"));
+    }
+
+    #[test]
+    fn script_query_apis_do_not_crash_stub() {
+        let (text, _, _) =
+            render_text("<div id=\"main\">hi</div><script>document.write('done');</script>");
+        assert!(text.contains("hi"));
+        assert!(text.contains("done"));
     }
 
     #[test]

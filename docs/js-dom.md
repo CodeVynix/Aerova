@@ -1,6 +1,10 @@
-# JS DOM bindings v1 (Phase 6b)
+# JS DOM bindings v2 (deeper)
 
-- `document.write('text')`: appends to page text. `document.title`: page title. `console.log(...)`: captured logs, not page text. `window` aliases global.
-- Stub (default): scans `document.write` args, no real JS. Boa (`--features boa` / `aerova-js/boa`): really runs JS with bindings above.
-- Engine: `extract_scripts` runs inline `<script>` in order during `render_text`; writes append to visible text. `src=` scripts TODO.
-- Tests: `captures_document_write_stub_or_boa`, Boa-only `boa_bindings_title_and_log`, engine `script_write_appends_text`.
+- `document.getElementById(id)` -> `{tag,id,textContent}` or null.
+- `document.querySelector(sel)` / `querySelectorAll(sel)`: `*`, `tag`, `.class`, `#id`, `tag.class`, `tag#id`.
+- `document.write`, `document.title`, `console.log`, `window` alias (v1, kept).
+- `setTimeout(fn|string, ms)`: v1 queues in JS heap, fires after main script, ignores delay (TODO real clock).
+- `addEventListener(type, fn)`: v1 stores in JS heap, fires all listeners after script+timers (TODO real dispatch/targets).
+- Callbacks stay as real function refs in the JS heap (Boa stringifies functions as `[native code]`, so no source round-trip).
+- Stub (default): `document.write` scan only; query/timer/event calls degrade gracefully. Full DOM needs `--features boa`.
+- Engine builds `DomEl` snapshot per render and passes to `run_scripts_with_dom`.
