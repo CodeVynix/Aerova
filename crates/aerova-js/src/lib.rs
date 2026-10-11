@@ -1,6 +1,7 @@
 //! Aerova JS: stub by default, Boa engine behind `boa` feature.
-//! Phase 6c adds DOM query (`getElementById`/`querySelector(All)`),
-//! timers (`setTimeout` immediate v1) and events (`addEventListener`, fired after script).
+//! Phase 6d makes timers delay-ordered via a logical clock (Aerova has no
+//! event loop, so delays model ordering only) and events dispatchable with
+//! real event objects, per-element listeners and one `DOMContentLoaded`.
 //! Default keeps Lumora port std-only; `--features boa` gives real JS.
 
 use std::cell::RefCell;
@@ -187,7 +188,14 @@ mod boa_impl {
         }
     }
 
+    /// JS runtime shim: DOM query, element listeners, dispatch, timers.
+    /// Needs `__DOM`, `__TITLE`, `__aerova_write`, `__aerova_log` from Rust.
     const SHIM: &str = r##"
+var __wrappers = [];
+var __timerId = 1;
+var __now = 0;
+var __queue = [];
+
 function __match(e, sel) {
   if (sel === "*") return true;
   if (sel[0] === "#") return e.id === sel.slice(1);
@@ -207,17 +215,110 @@ function __match(e, sel) {
   }
   return e.tag === sel;
 }
-function __wrap(e) { return e ? { tag: e.tag, id: e.id, textContent: e.text } : null; }
-var __timerId = 1;
-var __timers = [];
-var __listeners = [];
+
+function __wrap(i) {
+  if (i === null || i === undefined || i < 0 || i >= __DOM.length) return null;
+  if (__wrappers[i]) return __wrappers[i];
+  var e = __DOM[i];
+  var o = { tag: e.tag, id: e.id, textContent: e.text, classes: e.classes.slice() };
+  o.__listeners = [];
+  o.addEventListener = function (t, fn) { this.__listeners.push({ type: t, fn: fn }); };
+  o.removeEventListener = function (t, fn) {
+    var ls = this.__listeners;
+    for (var k = 0; k < ls.length; k++) {
+      if (ls[k].type === t && ls[k].fn === fn) { ls.splice(k, 1); return true; }
+    }
+    return false;
+  };
+  o.dispatchEvent = function (ev) { return __dispatch(this, ev); };
+  __wrappers[i] = o;
+  return o;
+}
+
+function __dispatch(target, ev) {
+  if (typeof ev === 'string') ev = { type: ev };
+  if (!ev) ev = {};
+  var e = {
+    type: ev.type || '',
+    target: target,
+    currentTarget: target,
+    bubbles: ev.bubbles === undefined ? true : !!ev.bubbles,
+    defaultPrevented: false,
+    __stopped: false
+  };
+  e.preventDefault = function () { e.defaultPrevented = true; };
+  e.stopPropagation = function () { e.__stopped = true; };
+  var ls = target.__listeners || [];
+  for (var k = 0; k < ls.length; k++) {
+    if (ls[k].type !== e.type) continue;
+    e.currentTarget = target;
+    ls[k].fn(e);
+    if (e.__stopped) break;
+  }
+  return !e.defaultPrevented;
+}
+
+var document = {
+  __listeners: [],
+  title: __TITLE,
+  write: __aerova_write,
+  getElementById: function (id) {
+    for (var i = 0; i < __DOM.length; i++) if (__DOM[i].id === id) return __wrap(i);
+    return null;
+  },
+  querySelector: function (sel) {
+    for (var i = 0; i < __DOM.length; i++) if (__match(__DOM[i], sel)) return __wrap(i);
+    return null;
+  },
+  querySelectorAll: function (sel) {
+    var out = [];
+    for (var i = 0; i < __DOM.length; i++) if (__match(__DOM[i], sel)) out.push(__wrap(i));
+    return out;
+  },
+  addEventListener: function (t, fn) { this.__listeners.push({ type: t, fn: fn }); },
+  removeEventListener: function (t, fn) {
+    var ls = this.__listeners;
+    for (var k = 0; k < ls.length; k++) if (ls[k].type === t && ls[k].fn === fn) { ls.splice(k, 1); return true; }
+    return false;
+  },
+  dispatchEvent: function (ev) { return __dispatch(this, ev); }
+};
+
+var window = globalThis;
+var console = { log: __aerova_log };
+
+function setTimeout(fn, ms) {
+  var id = __timerId++;
+  __queue.push({ id: id, fn: fn, due: __now + (ms || 0) });
+  return id;
+}
+
+function clearTimeout(id) {
+  for (var i = 0; i < __queue.length; i++) {
+    if (__queue[i].id === id) { __queue.splice(i, 1); return; }
+  }
+}
 "##;
 
-    /// JS run after the main script: fires timers then listeners, isolated per callback.
+    /// Drains the timer queue after the main script, plus one DOMContentLoaded.
+    /// `__now` advances to each due time so delays model ordering only, and a
+    /// callback cap keeps the drain finite without an event loop.
     const FIRE: &str = r##"
-__timers.forEach(function(t) { try { if (typeof t.fn === 'function') { t.fn(); } else { eval(t.fn); } } catch (e) {} });
-__timers = [];
-__listeners.forEach(function(l) { try { if (typeof l.fn === 'function') { l.fn(); } else { eval(l.fn); } } catch (e) {} });
+var __fired = 0;
+try { __dispatch(document, { type: 'DOMContentLoaded' }); } catch (e) {}
+while (__queue.length > 0 && __fired < 10000) {
+  var __bi = -1;
+  for (var i = 0; i < __queue.length; i++) {
+    if (__bi < 0 || __queue[i].due < __queue[__bi].due) __bi = i;
+  }
+  if (__bi < 0) break;
+  var t = __queue.splice(__bi, 1)[0];
+  if (t.due > __now) __now = t.due;
+  __fired++;
+  try {
+    if (typeof t.fn === 'function') { t.fn(); } else { eval(t.fn); }
+  } catch (e) {}
+}
 "##;
 
     /// Install bindings + DOM snapshot, then eval main script, timers, listeners.
@@ -243,9 +344,9 @@ __listeners.forEach(function(l) { try { if (typeof l.fn === 'function') { l.fn()
             )
             .map_err(|e| format!("boa-bind: {e}"))?;
             let setup_src = format!(
-                "var __DOM = {}; var __TITLE = {:?};\nvar document = {{ title: __TITLE, write: __aerova_write, getElementById: function(id) {{ var e = null; for (var i = 0; i < __DOM.length; i++) if (__DOM[i].id === id) {{ e = __DOM[i]; break; }} return __wrap(e); }}, querySelector: function(sel) {{ for (var i = 0; i < __DOM.length; i++) if (__match(__DOM[i], sel)) return __wrap(__DOM[i]); return null; }}, querySelectorAll: function(sel) {{ var out = []; for (var i = 0; i < __DOM.length; i++) if (__match(__DOM[i], sel)) out.push({{ tag: __DOM[i].tag, id: __DOM[i].id, textContent: __DOM[i].text }}); return out; }}, addEventListener: function(t, fn) {{ __listeners.push({{t: t, fn: fn}}); }} }}; var window = globalThis; var console = {{ log: __aerova_log }}; function setTimeout(fn, ms) {{ var id = __timerId++; __timers.push({{fn: fn, ms: ms || 0}}); return id; }};",
+                "var __DOM = {}; var __TITLE = {:?};",
                 dom_to_json(dom),
-                title,
+                title
             );
             ctx.eval(Source::from_bytes(setup_src.as_str()))
                 .map_err(|e| format!("boa-bind: {e}"))?;
@@ -263,8 +364,8 @@ __listeners.forEach(function(l) { try { if (typeof l.fn === 'function') { l.fn()
                 .map_err(|e| format!("boa-stringify: {e}")),
             Err(e) => Err(format!("boa-eval: {e}")),
         };
-        // Fire timers in order (v1 ignores delay), then all listeners.
-        // Callbacks live in the JS heap, so no Rust-side function storage is needed.
+        // Drain timers (and the single DOMContentLoaded) in the same context,
+        // so callbacks registered by scripts run with the same bindings.
         let _ = ctx.eval(Source::from_bytes(FIRE));
         let writes = WRITES.with(|w| std::mem::take(&mut *w.borrow_mut()));
         let logs = LOGS.with(|l| std::mem::take(&mut *l.borrow_mut()));
@@ -469,14 +570,107 @@ mod tests {
 
     #[cfg(feature = "boa")]
     #[test]
-    fn boa_timers_and_listeners_fire() {
-        let (r, writes, _) = boa_impl::run_with_bindings(
-            "setTimeout(function(){ document.write('later'); }, 10); document.addEventListener('click', function(){ document.write('clicked'); });",
+    fn boa_timers_respect_delay_order() {
+        let (_r, writes, _) = boa_impl::run_with_bindings(
+            "setTimeout(function(){ document.write('slow'); }, 5); setTimeout(function(){ document.write('fast'); }, 0); setTimeout(function(){ document.write('mid'); }, 2);",
             "T",
             &[],
         );
-        assert!(r.is_ok());
-        assert!(writes.contains(&"later".to_string()));
-        assert!(writes.contains(&"clicked".to_string()));
+        assert_eq!(
+            writes,
+            vec!["fast".to_string(), "mid".to_string(), "slow".to_string()]
+        );
+    }
+
+    #[cfg(feature = "boa")]
+    #[test]
+    fn boa_clear_timeout_cancels() {
+        let (_r, writes, _) = boa_impl::run_with_bindings(
+            "var id = setTimeout(function(){ document.write('never'); }, 0); clearTimeout(id); setTimeout(function(){ document.write('ran'); }, 1);",
+            "T",
+            &[],
+        );
+        assert_eq!(writes, vec!["ran".to_string()]);
+    }
+
+    #[cfg(feature = "boa")]
+    #[test]
+    fn boa_timer_chained_from_timer_fires_after() {
+        let (_r, writes, _) = boa_impl::run_with_bindings(
+            "setTimeout(function(){ document.write('one'); setTimeout(function(){ document.write('two'); }, 0); }, 0);",
+            "T",
+            &[],
+        );
+        assert_eq!(writes, vec!["one".to_string(), "two".to_string()]);
+    }
+
+    #[cfg(feature = "boa")]
+    #[test]
+    fn boa_timers_fire_after_domcontentloaded() {
+        let (_r, writes, _) = boa_impl::run_with_bindings(
+            "document.addEventListener('DOMContentLoaded', function(){ document.write('dcl'); }); setTimeout(function(){ document.write('timer'); }, 0);",
+            "T",
+            &[],
+        );
+        assert_eq!(writes, vec!["dcl".to_string(), "timer".to_string()]);
+    }
+
+    #[cfg(feature = "boa")]
+    #[test]
+    fn boa_dispatch_event_target_and_type() {
+        let dom = fixture_dom();
+        let (_r, writes, _) = boa_impl::run_with_bindings(
+            "var el = document.getElementById('main'); el.addEventListener('click', function(ev){ document.write(ev.target.id + ':' + ev.type + ':' + (ev.target === el)); }); el.dispatchEvent({ type: 'click' });",
+            "T",
+            &dom,
+        );
+        assert_eq!(writes, vec!["main:click:true".to_string()]);
+    }
+
+    #[cfg(feature = "boa")]
+    #[test]
+    fn boa_dispatch_prevent_default_and_return() {
+        let dom = fixture_dom();
+        let (_r, writes, _) = boa_impl::run_with_bindings(
+            "var el = document.querySelector('#main'); el.addEventListener('submit', function(ev){ ev.preventDefault(); document.write('dp:' + ev.defaultPrevented); }); var ok = el.dispatchEvent({ type: 'submit' }); document.write('ret:' + ok);",
+            "T",
+            &dom,
+        );
+        assert_eq!(writes, vec!["dp:true".to_string(), "ret:false".to_string()]);
+    }
+
+    #[cfg(feature = "boa")]
+    #[test]
+    fn boa_remove_event_listener_stops_calls() {
+        let dom = fixture_dom();
+        let (_r, writes, _) = boa_impl::run_with_bindings(
+            "var el = document.getElementById('main'); var h = function(){ document.write('hit'); }; el.addEventListener('click', h); el.dispatchEvent('click'); el.removeEventListener('click', h); el.dispatchEvent('click');",
+            "T",
+            &dom,
+        );
+        assert_eq!(writes, vec!["hit".to_string()]);
+    }
+
+    #[cfg(feature = "boa")]
+    #[test]
+    fn boa_element_identity_stable_across_queries() {
+        let dom = fixture_dom();
+        let (_r, writes, _) = boa_impl::run_with_bindings(
+            "var a = document.getElementById('main'); var b = document.querySelector('#main'); document.write('same:' + (a === b)); a.addEventListener('click', function(){ document.write('via-b'); }); b.dispatchEvent('click');",
+            "T",
+            &dom,
+        );
+        assert_eq!(writes, vec!["same:true".to_string(), "via-b".to_string()]);
+    }
+
+    #[cfg(feature = "boa")]
+    #[test]
+    fn boa_undispatched_listener_never_fires() {
+        let (_r, writes, _) = boa_impl::run_with_bindings(
+            "document.addEventListener('click', function(){ document.write('clicked'); });",
+            "T",
+            &[],
+        );
+        assert!(writes.is_empty());
     }
 }
