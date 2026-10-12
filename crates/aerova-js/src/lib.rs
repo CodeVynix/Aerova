@@ -1,8 +1,8 @@
 //! Aerova JS: stub by default, Boa engine behind `boa` feature.
-//! Phase 6d makes timers delay-ordered via a logical clock (Aerova has no
-//! event loop, so delays model ordering only) and events dispatchable with
-//! real event objects, per-element listeners and one `DOMContentLoaded`.
-//! Default keeps Lumora port std-only; `--features boa` gives real JS.
+//! Phase 6e extends the element wrapper (`getAttribute`/`setAttribute`, `className`,
+//! `classList`) and makes dispatch target-scoped: events walk the parent chain
+//! and terminate at `document`, so delegation works. Default keeps Lumora
+//! port std-only; `--features boa` gives real JS.
 
 use std::cell::RefCell;
 
@@ -21,6 +21,10 @@ pub struct DomEl {
     pub classes: Vec<String>,
     /// Visible text inside the element.
     pub text: String,
+    /// `(name, value)` attributes, names lowercased by the parser.
+    pub attrs: Vec<(String, String)>,
+    /// Snapshot index of the parent element; `None` for top-level elements.
+    pub parent: Option<usize>,
 }
 
 #[cfg(feature = "boa")]
@@ -48,7 +52,7 @@ fn dom_to_json(dom: &[DomEl]) -> String {
             out.push(',');
         }
         out.push_str(&format!(
-            "{{\"tag\":\"{}\",\"id\":\"{}\",\"classes\":[{}],\"text\":\"{}\"}}",
+            "{{\"tag\":\"{}\",\"id\":\"{}\",\"classes\":[{}],\"text\":\"{}\",\"attrs\":[{}],\"parent\":{}}}",
             escape_json(&e.tag),
             escape_json(&e.id),
             e.classes
@@ -57,6 +61,15 @@ fn dom_to_json(dom: &[DomEl]) -> String {
                 .collect::<Vec<_>>()
                 .join(","),
             escape_json(&e.text),
+            e.attrs
+                .iter()
+                .map(|(k, v)| format!("[\"{}\",\"{}\"]", escape_json(k), escape_json(v)))
+                .collect::<Vec<_>>()
+                .join(","),
+            match e.parent {
+                Some(p) => p.to_string(),
+                None => "null".to_string(),
+            },
         ));
     }
     out.push(']');
@@ -216,12 +229,45 @@ function __match(e, sel) {
   return e.tag === sel;
 }
 
+function __attrVal(o, k) {
+  for (var j = 0; j < o.attrs.length; j++) if (o.attrs[j][0] === k) return o.attrs[j][1];
+  return null;
+}
+
 function __wrap(i) {
   if (i === null || i === undefined || i < 0 || i >= __DOM.length) return null;
   if (__wrappers[i]) return __wrappers[i];
   var e = __DOM[i];
-  var o = { tag: e.tag, id: e.id, textContent: e.text, classes: e.classes.slice() };
+  var o = { tag: e.tag, id: e.id, textContent: e.text, classes: e.classes.slice(), attrs: (e.attrs || []).slice() };
   o.__listeners = [];
+  o.__parent = e.parent === null || e.parent === undefined ? null : e.parent;
+  Object.defineProperty(o, 'className', {
+    get: function () { return o.classes.join(' '); },
+    set: function (v) {
+      var parts = String(v).split(' ');
+      o.classes = [];
+      for (var j = 0; j < parts.length; j++) if (parts[j].length > 0) o.classes.push(parts[j]);
+    }
+  });
+  o.getAttribute = function (k) { return __attrVal(o, k); };
+  o.setAttribute = function (k, v) {
+    for (var j = 0; j < o.attrs.length; j++) if (o.attrs[j][0] === k) { o.attrs[j][1] = String(v); return; }
+    o.attrs.push([k, String(v)]);
+  };
+  o.removeAttribute = function (k) {
+    for (var j = 0; j < o.attrs.length; j++) if (o.attrs[j][0] === k) { o.attrs.splice(j, 1); return; }
+  };
+  o.hasAttribute = function (k) { return __attrVal(o, k) !== null; };
+  o.classList = {
+    add: function (c) { if (o.classes.indexOf(c) < 0) o.classes.push(c); },
+    remove: function (c) { var i = o.classes.indexOf(c); if (i >= 0) o.classes.splice(i, 1); },
+    contains: function (c) { return o.classes.indexOf(c) >= 0; },
+    toggle: function (c) {
+      if (o.classList.contains(c)) { o.classList.remove(c); return false; }
+      o.classList.add(c);
+      return true;
+    }
+  };
   o.addEventListener = function (t, fn) { this.__listeners.push({ type: t, fn: fn }); };
   o.removeEventListener = function (t, fn) {
     var ls = this.__listeners;
@@ -235,6 +281,13 @@ function __wrap(i) {
   return o;
 }
 
+function __parentOf(node) {
+  if (node === document) return null;
+  var p = node.__parent;
+  if (p === null || p === undefined) return document;
+  return __wrap(p);
+}
+
 function __dispatch(target, ev) {
   if (typeof ev === 'string') ev = { type: ev };
   if (!ev) ev = {};
@@ -244,16 +297,24 @@ function __dispatch(target, ev) {
     currentTarget: target,
     bubbles: ev.bubbles === undefined ? true : !!ev.bubbles,
     defaultPrevented: false,
-    __stopped: false
+    __stopBubble: false,
+    __stopNow: false
   };
   e.preventDefault = function () { e.defaultPrevented = true; };
-  e.stopPropagation = function () { e.__stopped = true; };
-  var ls = target.__listeners || [];
-  for (var k = 0; k < ls.length; k++) {
-    if (ls[k].type !== e.type) continue;
-    e.currentTarget = target;
-    ls[k].fn(e);
-    if (e.__stopped) break;
+  e.stopPropagation = function () { e.__stopBubble = true; };
+  e.stopImmediatePropagation = function () { e.__stopBubble = true; e.__stopNow = true; };
+  var node = target;
+  var guard = 0;
+  while (node && guard++ < 1000) {
+    e.currentTarget = node;
+    var ls = node.__listeners || [];
+    for (var k = 0; k < ls.length; k++) {
+      if (ls[k].type !== e.type) continue;
+      ls[k].fn(e);
+      if (e.__stopNow) return !e.defaultPrevented;
+    }
+    if (!e.bubbles || e.__stopBubble) break;
+    node = __parentOf(node);
   }
   return !e.defaultPrevented;
 }
@@ -504,12 +565,16 @@ mod tests {
                 id: "main".into(),
                 classes: vec!["row".into()],
                 text: "hello box".into(),
+                attrs: vec![("data-x".into(), "1".into())],
+                parent: None,
             },
             DomEl {
                 tag: "span".into(),
-                id: "".into(),
+                id: "inner".into(),
                 classes: vec!["row".into()],
                 text: "side note".into(),
+                attrs: vec![],
+                parent: Some(0),
             },
         ]
     }
@@ -661,6 +726,148 @@ mod tests {
             &dom,
         );
         assert_eq!(writes, vec!["same:true".to_string(), "via-b".to_string()]);
+    }
+
+    #[cfg(feature = "boa")]
+    #[test]
+    fn boa_element_attribute_api() {
+        let dom = fixture_dom();
+        let (r, writes, _) = boa_impl::run_with_bindings(
+            "var el = document.getElementById('main'); \
+             document.write('g:' + el.getAttribute('data-x')); \
+             document.write('h:' + el.hasAttribute('href')); \
+             el.setAttribute('href', 'http://a'); \
+             document.write('s:' + el.getAttribute('href')); \
+             el.removeAttribute('data-x'); \
+             document.write('r:' + el.getAttribute('data-x'));",
+            "T",
+            &dom,
+        );
+        assert!(r.is_ok());
+        assert_eq!(
+            writes,
+            vec![
+                "g:1".to_string(),
+                "h:false".to_string(),
+                "s:http://a".to_string(),
+                "r:null".to_string()
+            ]
+        );
+    }
+
+    #[cfg(feature = "boa")]
+    #[test]
+    fn boa_class_name_and_class_list() {
+        let dom = fixture_dom();
+        let (r, writes, _) = boa_impl::run_with_bindings(
+            "var el = document.querySelector('span'); \
+             document.write('cn:' + el.className + ':' + el.classList.contains('row')); \
+             el.classList.add('hot'); \
+             document.write('a:' + el.classList.contains('hot') + ':' + el.className); \
+             el.classList.remove('row'); \
+             document.write('rm:' + el.classList.contains('row')); \
+             document.write('t:' + el.classList.toggle('hot') + ':' + el.classList.toggle('new'));",
+            "T",
+            &dom,
+        );
+        assert!(r.is_ok());
+        assert_eq!(
+            writes,
+            vec![
+                "cn:row:true".to_string(),
+                "a:true:row hot".to_string(),
+                "rm:false".to_string(),
+                "t:false:true".to_string()
+            ]
+        );
+    }
+
+    #[cfg(feature = "boa")]
+    #[test]
+    fn boa_event_bubbles_to_parent_and_document() {
+        let dom = fixture_dom();
+        let (r, writes, _) = boa_impl::run_with_bindings(
+            "var seen = []; \
+             document.addEventListener('click', function (ev) { seen.push('doc:' + ev.target.id + ':' + (ev.currentTarget === document)); }); \
+             document.addEventListener('tick', function () { seen.push('no-match'); }); \
+             document.getElementById('main').addEventListener('click', function (ev) { seen.push('p:' + ev.target.id + ':' + ev.currentTarget.id); }); \
+             document.querySelector('span').addEventListener('click', function () { seen.push('t'); }); \
+             document.querySelector('span').dispatchEvent({ type: 'click' }); \
+             document.write(seen.join('|'));",
+            "T",
+            &dom,
+        );
+        assert!(r.is_ok());
+        assert_eq!(writes, vec!["t|p:inner:main|doc:inner:true".to_string()]);
+    }
+
+    #[cfg(feature = "boa")]
+    #[test]
+    fn boa_event_stop_propagation_halts_bubble_only() {
+        let dom = fixture_dom();
+        let (r, writes, _) = boa_impl::run_with_bindings(
+            "var seen = []; \
+             document.addEventListener('click', function () { seen.push('doc'); }); \
+             document.getElementById('main').addEventListener('click', function (ev) { \
+               seen.push('p1'); ev.stopPropagation(); }); \
+             document.getElementById('main').addEventListener('click', function () { seen.push('p2'); }); \
+             document.querySelector('span').dispatchEvent('click'); \
+             document.write(seen.join(','));",
+            "T",
+            &dom,
+        );
+        assert!(r.is_ok());
+        assert_eq!(writes, vec!["p1,p2".to_string()]);
+    }
+
+    #[cfg(feature = "boa")]
+    #[test]
+    fn boa_event_stop_immediate_halts_same_node() {
+        let dom = fixture_dom();
+        let (r, writes, _) = boa_impl::run_with_bindings(
+            "var seen = []; \
+             document.addEventListener('click', function () { seen.push('doc'); }); \
+             document.getElementById('main').addEventListener('click', function (ev) { \
+               seen.push('p1'); ev.stopImmediatePropagation(); }); \
+             document.getElementById('main').addEventListener('click', function () { seen.push('p2'); }); \
+             document.querySelector('span').dispatchEvent('click'); \
+             document.write(seen.join(','));",
+            "T",
+            &dom,
+        );
+        assert!(r.is_ok());
+        assert_eq!(writes, vec!["p1".to_string()]);
+    }
+
+    #[cfg(feature = "boa")]
+    #[test]
+    fn boa_event_bubbles_false_stops_at_target() {
+        let dom = fixture_dom();
+        let (r, writes, _) = boa_impl::run_with_bindings(
+            "var seen = []; \
+             document.addEventListener('click', function () { seen.push('doc'); }); \
+             document.getElementById('main').addEventListener('click', function () { seen.push('p'); }); \
+             document.querySelector('span').addEventListener('click', function () { seen.push('t'); }); \
+             document.querySelector('span').dispatchEvent({ type: 'click', bubbles: false }); \
+             document.write(seen.join('|'));",
+            "T",
+            &dom,
+        );
+        assert!(r.is_ok());
+        assert_eq!(writes, vec!["t".to_string()]);
+    }
+
+    #[cfg(feature = "boa")]
+    #[test]
+    fn boa_document_has_no_parent_bubble_path() {
+        let dom = fixture_dom();
+        let (r, writes, _) = boa_impl::run_with_bindings(
+            "document.dispatchEvent({ type: 'x' }); document.write('ret:' + document.dispatchEvent('x'));",
+            "T",
+            &dom,
+        );
+        assert!(r.is_ok());
+        assert_eq!(writes, vec!["ret:true".to_string()]);
     }
 
     #[cfg(feature = "boa")]

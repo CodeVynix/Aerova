@@ -256,8 +256,9 @@ fn element_text(n: &aerova_dom::Node, out: &mut String) {
 }
 
 /// Snapshot queryable elements for JS bindings (skips style/script/head/title).
+/// `parent` is the snapshot index of the enclosing element, used by JS bubbling.
 fn dom_snapshot(doc: &aerova_dom::Document) -> Vec<aerova_js::DomEl> {
-    fn walk(n: &aerova_dom::Node, out: &mut Vec<aerova_js::DomEl>) {
+    fn walk(n: &aerova_dom::Node, parent: Option<usize>, out: &mut Vec<aerova_js::DomEl>) {
         match n {
             aerova_dom::Node::Text(_) => {}
             aerova_dom::Node::Element {
@@ -281,21 +282,24 @@ fn dom_snapshot(doc: &aerova_dom::Document) -> Vec<aerova_js::DomEl> {
                     .find(|(k, _)| k == "class")
                     .map(|(_, v)| v.split_whitespace().map(|w| w.to_lowercase()).collect())
                     .unwrap_or_default();
+                let idx = out.len();
                 out.push(aerova_js::DomEl {
                     tag: tag.to_lowercase(),
                     id,
                     classes,
                     text,
+                    attrs: attrs.clone(),
+                    parent,
                 });
                 for c in children {
-                    walk(c, out);
+                    walk(c, Some(idx), out);
                 }
             }
         }
     }
     let mut v = Vec::new();
     for n in &doc.nodes {
-        walk(n, &mut v);
+        walk(n, None, &mut v);
     }
     v
 }
@@ -512,5 +516,31 @@ mod tests {
         assert!(render_isolated("bogus://nope", &policy).is_err());
         // Other tab still works after a failure.
         assert!(render_isolated("aerova://home", &policy).is_ok());
+    }
+
+    #[cfg(feature = "boa")]
+    #[test]
+    fn snapshot_attributes_reach_js() {
+        let html = r#"<a href="http://example.com" data-x="7">link</a><script>document.write(document.querySelector('a').getAttribute('href') + '|' + document.querySelector('a').getAttribute('data-x'));</script>"#;
+        let (text, _, _) = render_text(html);
+        assert!(text.contains("http://example.com"));
+        assert!(text.contains("|7"));
+    }
+
+    #[cfg(feature = "boa")]
+    #[test]
+    fn event_bubbles_through_snapshot_parents() {
+        let html = r#"<div id="p"><div id="c">x</div></div><script>var seen = []; document.getElementById('p').addEventListener('click', function (ev) { seen.push(ev.target.id + '>' + ev.currentTarget.id); }); document.addEventListener('click', function (ev) { seen.push('doc>' + ev.target.id); }); document.getElementById('c').dispatchEvent('click'); document.write(seen.join(','));</script>"#;
+        let (text, _, _) = render_text(html);
+        assert!(text.contains("c>p"));
+        assert!(text.contains("doc>c"));
+    }
+
+    #[cfg(feature = "boa")]
+    #[test]
+    fn event_does_not_bubble_across_siblings() {
+        let html = r#"<div id="a">1</div><div id="b">2</div><script>var seen = []; document.getElementById('a').addEventListener('click', function () { seen.push('b-visited'); }); document.getElementById('b').dispatchEvent('click'); document.write(seen.join(','));</script>"#;
+        let (text, _, _) = render_text(html);
+        assert!(!text.contains("b-visited"));
     }
 }

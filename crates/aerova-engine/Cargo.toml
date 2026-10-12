@@ -12,3 +12,6 @@ aerova-paint = { path = "../aerova-paint" }
 aerova-net = { path = "../aerova-net" }
 aerova-search = { path = "../aerova-search" }
 aerova-js = { path = "../aerova-js" }
+
+[features]
+boa = ["aerova-js/boa"]
