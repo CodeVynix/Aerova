@@ -308,7 +308,7 @@ fn paint_tree(fb: &mut aerova_paint::Framebuffer, b: &aerova_layout::BoxNode) {
     if let Some(bg) = b.background() {
         if let Some(rgb) = aerova_paint::parse_color(bg) {
             if b.w > 0 && b.h > 0 {
-                fb.rect(b.x, b.y, b.w, b.h.min(600), rgb);
+                fb.rect(b.x, b.y, b.w, b.h.min(fb.height), rgb);
             }
         }
     } else if b.kind == "#text" {
@@ -317,6 +317,32 @@ fn paint_tree(fb: &mut aerova_paint::Framebuffer, b: &aerova_layout::BoxNode) {
     for c in &b.children {
         paint_tree(fb, c);
     }
+}
+
+/// Viewport height in px; content taller than this scrolls.
+pub const PAGE_VIEW_H: u32 = 600;
+
+/// Lowest content edge across all boxes.
+fn content_bottom(boxes: &[aerova_layout::BoxNode]) -> u32 {
+    fn walk(b: &aerova_layout::BoxNode, max: &mut u32) {
+        *max = (*max).max(b.y + b.h);
+        for c in &b.children {
+            walk(c, max);
+        }
+    }
+    let mut m = 0;
+    for b in boxes {
+        walk(b, &mut m);
+    }
+    m
+}
+
+fn content_fb(boxes: &[aerova_layout::BoxNode]) -> aerova_paint::Framebuffer {
+    let mut fb = aerova_paint::Framebuffer::new(800, content_bottom(boxes).max(PAGE_VIEW_H));
+    for b in boxes {
+        paint_tree(&mut fb, b);
+    }
+    fb
 }
 
 /// Render HTML text to text + boxes + framebuffer.
@@ -348,10 +374,7 @@ pub fn render_text(
         }
     }
     let boxes = aerova_layout::layout(&doc, &rules);
-    let mut fb = aerova_paint::Framebuffer::new(800, 600);
-    for b in &boxes {
-        paint_tree(&mut fb, b);
-    }
+    let fb = content_fb(&boxes);
     (text, boxes, fb)
 }
 
@@ -362,8 +385,13 @@ pub struct Page {
     pub text: String,
     /// Layout boxes, tagged with snapshot indices for hit-testing.
     pub boxes: Vec<aerova_layout::BoxNode>,
-    /// Painted pixels (layout never changes after open).
+    /// Painted pixels; full content height, taller than the viewport when the
+    /// page scrolls (`view_h` rows are shown at a time).
     pub fb: aerova_paint::Framebuffer,
+    /// Viewport height in px.
+    view_h: u32,
+    /// Vertical scroll offset in px.
+    scroll_y: u32,
     js: aerova_js::JsSession,
 }
 
@@ -399,22 +427,23 @@ impl Page {
             text.push_str(w);
         }
         let boxes = aerova_layout::layout(&doc, &rules);
-        let mut fb = aerova_paint::Framebuffer::new(800, 600);
-        for b in &boxes {
-            paint_tree(&mut fb, b);
-        }
+        let fb = content_fb(&boxes);
         Ok(Self {
             text,
             boxes,
             fb,
+            view_h: PAGE_VIEW_H,
+            scroll_y: 0,
             js,
         })
     }
 
-    /// Click at page coords: hit-test, dispatch `click` with bubbling.
-    /// Returns new writes (also appended to `text`).
+    /// Click at viewport coords (origin is the page area, not the window):
+    /// hit-test, dispatch `click` with bubbling. Returns new writes (also
+    /// appended to `text`).
     pub fn click(&mut self, x: u32, y: u32) -> Vec<String> {
-        let Some(idx) = aerova_layout::hit_test(&self.boxes, x, y) else {
+        let Some(idx) = aerova_layout::hit_test(&self.boxes, x, y.saturating_add(self.scroll_y))
+        else {
             return Vec::new();
         };
         let (_, writes, _) = self.js.dispatch(idx, "click");
@@ -425,6 +454,37 @@ impl Page {
             self.text.push_str(w);
         }
         writes
+    }
+
+    /// Scroll to an absolute content offset, clamped to the content.
+    pub fn scroll_to(&mut self, y: u32) {
+        let max = self.content_h().saturating_sub(self.view_h);
+        self.scroll_y = y.min(max);
+    }
+
+    /// Scroll by `dy` px (negative scrolls up), clamped to the content.
+    pub fn scroll_by(&mut self, dy: i32) {
+        let max = self.content_h().saturating_sub(self.view_h) as i64;
+        let next = (self.scroll_y as i64 + dy as i64).clamp(0, max);
+        self.scroll_y = next as u32;
+    }
+
+    /// Current scroll offset in px.
+    #[must_use]
+    pub fn scroll_y(&self) -> u32 {
+        self.scroll_y
+    }
+
+    /// Total content height in px.
+    #[must_use]
+    pub fn content_h(&self) -> u32 {
+        self.fb.height
+    }
+
+    /// Viewport height in px.
+    #[must_use]
+    pub fn view_h(&self) -> u32 {
+        self.view_h
     }
 
     /// Fetch URL then open.
@@ -659,6 +719,33 @@ mod tests {
         assert!(page.click(10, 500).is_empty());
     }
 
+    #[test]
+    fn short_page_keeps_viewport_framebuffer() {
+        let page = Page::open("<p>hi</p>").unwrap();
+        assert_eq!(page.content_h(), PAGE_VIEW_H);
+        assert_eq!(page.view_h(), PAGE_VIEW_H);
+        assert_eq!(page.scroll_y(), 0);
+    }
+
+    #[test]
+    fn long_page_grows_and_scroll_clamps() {
+        let mut html = String::from("<style>p { height: 40px; }</style>");
+        for i in 0..20 {
+            html.push_str(&format!("<p>line {i}</p>"));
+        }
+        let mut page = Page::open(&html).unwrap();
+        assert_eq!(page.content_h(), 800);
+        assert!(page.content_h() > page.view_h());
+        page.scroll_by(-100);
+        assert_eq!(page.scroll_y(), 0);
+        page.scroll_by(50);
+        assert_eq!(page.scroll_y(), 50);
+        page.scroll_by(10_000);
+        assert_eq!(page.scroll_y(), 200);
+        page.scroll_by(-10_000);
+        assert_eq!(page.scroll_y(), 0);
+    }
+
     #[cfg(feature = "boa")]
     fn box_center(boxes: &[aerova_layout::BoxNode], el: usize) -> Option<(u32, u32)> {
         for b in boxes {
@@ -682,6 +769,25 @@ mod tests {
         assert!(writes.contains(&"self".to_string()));
         assert!(writes.contains(&"p:c".to_string()));
         assert!(page.text.contains("self"));
+    }
+
+    #[cfg(feature = "boa")]
+    #[test]
+    fn page_click_respects_scroll_offset() {
+        let mut html = String::from(
+            "<style>p { height: 40px; }</style><script>document.querySelectorAll('p')[19].addEventListener('click', function () { document.write('last'); });</script>",
+        );
+        for i in 0..20 {
+            html.push_str(&format!("<p>line {i}</p>"));
+        }
+        let mut page = Page::open(&html).unwrap();
+        let bottom = page.view_h() - 20;
+        assert!(page.click(50, bottom).is_empty());
+        page.scroll_by(10_000);
+        assert_eq!(page.scroll_y(), 200);
+        let writes = page.click(50, bottom);
+        assert!(writes.contains(&"last".to_string()));
+        assert!(page.text.contains("last"));
     }
 
     #[cfg(feature = "boa")]

@@ -392,6 +392,20 @@ fn tab_cell_w(count: usize) -> usize {
     (WIN_W / count.max(1)).max(TAB_MIN_W)
 }
 
+/// Scrollbar thumb at `(x, y, h)`, or `None` when content fits the viewport.
+fn scrollbar(tabs: &Tabs) -> Option<(usize, usize, usize)> {
+    let page = tabs.page();
+    let content = page.content_h() as usize;
+    if content <= PAGE_H {
+        return None;
+    }
+    let thumb_h = (PAGE_H * PAGE_H / content).max(24);
+    let max_off = page.content_h() - page.view_h();
+    let travel = PAGE_H - thumb_h;
+    let top = (page.scroll_y() as usize * travel) / max_off as usize;
+    Some((WIN_W - 4, PAGE_Y + top, thumb_h))
+}
+
 /// Strip cell index at x. Every in-window x maps to a tab; empty set has none.
 fn tab_at(x: usize, count: usize) -> Option<usize> {
     if count == 0 {
@@ -460,11 +474,17 @@ fn draw(buf: &mut [u32], tabs: &Tabs, url: &str, status: &str) {
     }
     fill_rect(buf, 0, TAB_BAR, WIN_W, BAR, WHITE);
     fill_rect(buf, 0, STATUS_Y, WIN_W, BAR, GRAY);
-    let src = fb_to_u32(&tabs.page().fb);
+    let page = tabs.page();
+    let top = page.scroll_y() as usize;
+    let src = fb_to_u32(&page.fb);
     for y in 0..PAGE_H {
+        let row = (top + y).min(src.len() / PAGE_W - 1) * PAGE_W;
         for x in 0..PAGE_W {
-            buf[(y + PAGE_Y) * WIN_W + x] = src[y * PAGE_W + x];
+            buf[(y + PAGE_Y) * WIN_W + x] = src[row + x];
         }
+    }
+    if let Some((sx, sy, sh)) = scrollbar(tabs) {
+        fill_rect(buf, sx, sy, 4, sh, GRAY);
     }
     draw_text(buf, 4, TAB_BAR + 4, url, BLACK);
     fill_rect(buf, 4 + url.len() * 6, TAB_BAR + 12, 5, 1, BLACK);
@@ -474,6 +494,27 @@ fn draw(buf: &mut [u32], tabs: &Tabs, url: &str, status: &str) {
 fn sync_bar(tabs: &Tabs, editor: &mut Editor, status: &mut String) {
     editor.buf = tabs.url();
     *status = tabs.status_line();
+}
+
+/// Scroll keys: arrows nudge, Page keys jump a viewport, Home/End jump ends.
+fn scroll_keys(tabs: &mut Tabs, pressed: &[Key]) {
+    let view = tabs.page().view_h() as i32;
+    for k in pressed {
+        let dy = match k {
+            Key::Down => 40,
+            Key::Up => -40,
+            Key::PageDown => view,
+            Key::PageUp => -view,
+            _ => continue,
+        };
+        tabs.page_mut().scroll_by(dy);
+    }
+    if pressed.contains(&Key::Home) {
+        tabs.page_mut().scroll_to(0);
+    }
+    if pressed.contains(&Key::End) {
+        tabs.page_mut().scroll_to(u32::MAX);
+    }
 }
 
 fn main() {
@@ -529,8 +570,15 @@ fn main() {
             }
             None => {}
         }
+        let shift = window.is_key_down(Key::LeftShift) || window.is_key_down(Key::RightShift);
+        scroll_keys(&mut tabs, &pressed);
+        if let Some((_, wy)) = window.get_scroll_wheel() {
+            if wy.abs() > 0.5 {
+                let steps = (wy * 3.0) as i32;
+                tabs.page_mut().scroll_by(-steps * 20);
+            }
+        }
         if !(ctrl || alt) {
-            let shift = window.is_key_down(Key::LeftShift) || window.is_key_down(Key::RightShift);
             for k in pressed {
                 match k {
                     Key::Backspace => editor.backspace(),
