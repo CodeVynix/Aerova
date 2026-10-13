@@ -13,7 +13,7 @@ const PAGE_Y: usize = TAB_BAR + BAR;
 const STATUS_Y: usize = PAGE_Y + PAGE_H;
 const WIN_W: usize = PAGE_W;
 const WIN_H: usize = STATUS_Y + BAR;
-const TAB_W: usize = 160;
+const TAB_MIN_W: usize = 48;
 const BLACK: u32 = 0x000000;
 const DARK: u32 = 0x333333;
 const WHITE: u32 = 0xFFFFFF;
@@ -397,14 +397,17 @@ fn fresh_keys(pressed: &[Key], prev: &[Key]) -> Vec<Key> {
         .collect()
 }
 
-/// Strip cell index at x, if any tab lives there.
+/// Tab cell width: even split like Chrome, floored so cells stay clickable.
+fn tab_cell_w(count: usize) -> usize {
+    (WIN_W / count.max(1)).max(TAB_MIN_W)
+}
+
+/// Strip cell index at x. Every in-window x maps to a tab; empty set has none.
 fn tab_at(x: usize, count: usize) -> Option<usize> {
-    let i = x / TAB_W;
-    if i < count {
-        Some(i)
-    } else {
-        None
+    if count == 0 {
+        return None;
     }
+    Some((x / tab_cell_w(count)).min(count - 1))
 }
 
 fn fb_to_u32(fb: &aerova_paint::Framebuffer) -> Vec<u32> {
@@ -453,13 +456,16 @@ fn draw_text(buf: &mut [u32], x: usize, y: usize, s: &str, color: u32) {
 
 fn draw(buf: &mut [u32], tabs: &Tabs, url: &str, status: &str) {
     fill_rect(buf, 0, 0, WIN_W, TAB_BAR, GRAY);
-    for (i, (id, u)) in tabs.mgr.list().iter().enumerate() {
-        let short: String = u.chars().take(24).collect();
+    let list = tabs.mgr.list();
+    let cell = tab_cell_w(list.len());
+    let max_chars = (cell.saturating_sub(8) / 6).max(1);
+    for (i, (id, u)) in list.iter().enumerate() {
+        let short: String = u.chars().take(max_chars).collect();
         if *id == tabs.current {
-            fill_rect(buf, i * TAB_W, 0, TAB_W, TAB_BAR, BLACK);
-            draw_text(buf, 4 + i * TAB_W, 4, &short, WHITE);
+            fill_rect(buf, i * cell, 0, cell, TAB_BAR, BLACK);
+            draw_text(buf, 4 + i * cell, 4, &short, WHITE);
         } else {
-            draw_text(buf, 4 + i * TAB_W, 4, &short, DARK);
+            draw_text(buf, 4 + i * cell, 4, &short, DARK);
         }
     }
     fill_rect(buf, 0, TAB_BAR, WIN_W, BAR, WHITE);
@@ -667,11 +673,20 @@ mod tests {
     }
 
     #[test]
+    fn tab_cells_shrink_like_chrome() {
+        assert_eq!(tab_cell_w(1), 800);
+        assert_eq!(tab_cell_w(5), 160);
+        assert_eq!(tab_cell_w(6), 133);
+        assert_eq!(tab_cell_w(100), 48);
+    }
+
+    #[test]
     fn tab_strip_cells() {
         assert_eq!(tab_at(0, 3), Some(0));
-        assert_eq!(tab_at(159, 3), Some(0));
-        assert_eq!(tab_at(160, 3), Some(1));
-        assert_eq!(tab_at(320, 2), None);
+        assert_eq!(tab_at(265, 3), Some(0));
+        assert_eq!(tab_at(266, 3), Some(1));
+        assert_eq!(tab_at(799, 3), Some(2));
+        assert_eq!(tab_at(400, 6), Some(3));
         assert_eq!(tab_at(0, 0), None);
     }
 
