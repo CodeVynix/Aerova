@@ -387,16 +387,6 @@ impl Tabs {
     }
 }
 
-/// Keys pressed since the previous frame: nav gestures fire once per press,
-// while typing keeps OS repeat.
-fn fresh_keys(pressed: &[Key], prev: &[Key]) -> Vec<Key> {
-    pressed
-        .iter()
-        .filter(|k| !prev.contains(*k))
-        .copied()
-        .collect()
-}
-
 /// Tab cell width: even split like Chrome, floored so cells stay clickable.
 fn tab_cell_w(count: usize) -> usize {
     (WIN_W / count.max(1)).max(TAB_MIN_W)
@@ -504,14 +494,12 @@ fn main() {
     );
     let mut buf = vec![0u32; WIN_W * WIN_H];
     let mut was_down = false;
-    let mut prev: Vec<Key> = Vec::new();
     while window.is_open() && !window.is_key_down(Key::Escape) {
         let alt = window.is_key_down(Key::LeftAlt) || window.is_key_down(Key::RightAlt);
         let ctrl = window.is_key_down(Key::LeftCtrl) || window.is_key_down(Key::RightCtrl);
         let pressed = window.get_keys_pressed(KeyRepeat::Yes);
-        let fresh = fresh_keys(&pressed, &prev);
-        prev = pressed.clone();
-        match nav_action(&fresh, alt, ctrl) {
+        let gesture = window.get_keys_pressed(KeyRepeat::No);
+        match nav_action(&gesture, alt, ctrl) {
             Some(Nav::Back) => match tabs.back() {
                 Some(_) => sync_bar(&tabs, &mut editor, &mut status),
                 None => status = String::from("no back history"),
@@ -663,13 +651,6 @@ mod tests {
         assert_eq!(t.forward(), Some("bogus://nope".to_string()));
         assert_eq!(t.back(), Some("aerova://home".to_string()));
         assert_eq!(t.back(), None);
-    }
-
-    #[test]
-    fn repeat_keys_are_not_fresh() {
-        let prev = vec![Key::LeftCtrl, Key::T];
-        assert!(fresh_keys(&[Key::LeftCtrl, Key::T], &prev).is_empty());
-        assert_eq!(fresh_keys(&[Key::LeftCtrl, Key::W], &prev), vec![Key::W]);
     }
 
     #[test]
