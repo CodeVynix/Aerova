@@ -1,14 +1,19 @@
 //! Aerova GUI v1 (`gui` feature): minifb window on the engine framebuffer.
 //! URL bar + status line in a 5x7 bitmap font; clicks dispatch into the live page.
 
-use aerova_engine::{Page, TabManager};
+use aerova_engine::{Page, TabId, TabManager};
 use minifb::{Key, KeyRepeat, MouseButton, MouseMode, Window, WindowOptions};
+use std::collections::HashMap;
 
 const PAGE_W: usize = 800;
 const PAGE_H: usize = 600;
 const BAR: usize = 16;
+const TAB_BAR: usize = 16;
+const PAGE_Y: usize = TAB_BAR + BAR;
+const STATUS_Y: usize = PAGE_Y + PAGE_H;
 const WIN_W: usize = PAGE_W;
-const WIN_H: usize = PAGE_H + 2 * BAR;
+const WIN_H: usize = STATUS_Y + BAR;
+const TAB_W: usize = 160;
 const BLACK: u32 = 0x000000;
 const DARK: u32 = 0x333333;
 const WHITE: u32 = 0xFFFFFF;
@@ -233,15 +238,18 @@ fn normalize_url(s: &str) -> String {
     }
 }
 
-/// Keyboard navigation gesture, resolved from pressed keys + alt modifier.
+/// Keyboard navigation gesture, resolved from pressed keys + modifiers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Nav {
     Back,
     Forward,
     Reload,
+    NewTab,
+    CloseTab,
+    NextTab,
 }
 
-fn nav_action(pressed: &[Key], alt: bool) -> Option<Nav> {
+fn nav_action(pressed: &[Key], alt: bool, ctrl: bool) -> Option<Nav> {
     if alt && pressed.contains(&Key::Left) {
         return Some(Nav::Back);
     }
@@ -251,18 +259,141 @@ fn nav_action(pressed: &[Key], alt: bool) -> Option<Nav> {
     if pressed.contains(&Key::F5) {
         return Some(Nav::Reload);
     }
+    if ctrl && pressed.contains(&Key::T) {
+        return Some(Nav::NewTab);
+    }
+    if ctrl && pressed.contains(&Key::W) {
+        return Some(Nav::CloseTab);
+    }
+    if ctrl && pressed.contains(&Key::Tab) {
+        return Some(Nav::NextTab);
+    }
     None
 }
 
-fn load_url(page: &mut Page, editor: &mut Editor, status: &mut String, url: &str) {
-    match Page::open_url(url) {
-        Ok(p) => {
-            *page = p;
-            println!("{}", page.text);
-            editor.buf = url.to_string();
-            *status = format!("loaded {url}");
+/// One live page per tab; the manager owns history, the map owns JS worlds.
+struct Tabs {
+    mgr: TabManager,
+    pages: HashMap<TabId, Page>,
+    current: TabId,
+}
+
+fn blank() -> Page {
+    Page::open("").expect("blank page")
+}
+
+impl Tabs {
+    fn open(start: &str) -> Self {
+        let mut mgr = TabManager::new();
+        let current = mgr.new_tab(start);
+        let mut pages = HashMap::new();
+        pages.insert(current, Page::open_url(start).unwrap_or_else(|_| blank()));
+        Self {
+            mgr,
+            pages,
+            current,
         }
-        Err(e) => *status = format!("load failed: {e}"),
+    }
+
+    fn page(&self) -> &Page {
+        self.pages.get(&self.current).expect("current tab page")
+    }
+
+    fn page_mut(&mut self) -> &mut Page {
+        self.pages.get_mut(&self.current).expect("current tab page")
+    }
+
+    fn url(&self) -> String {
+        self.mgr.current(self.current).unwrap_or_default()
+    }
+
+    fn count(&self) -> usize {
+        self.mgr.len()
+    }
+
+    fn status_line(&self) -> String {
+        let list = self.mgr.list();
+        let pos = list
+            .iter()
+            .position(|(id, _)| *id == self.current)
+            .map_or(0, |i| i + 1);
+        format!("tab {}/{} {}", pos, list.len(), self.url())
+    }
+
+    fn load_id(&mut self, id: TabId, url: &str) {
+        self.pages
+            .insert(id, Page::open_url(url).unwrap_or_else(|_| blank()));
+        self.current = id;
+    }
+
+    fn go(&mut self, url: &str) {
+        self.mgr.navigate(self.current, url);
+        self.load_id(self.current, url);
+    }
+
+    fn back(&mut self) -> Option<String> {
+        let url = self.mgr.back(self.current)?;
+        self.load_id(self.current, &url);
+        Some(url)
+    }
+
+    fn forward(&mut self) -> Option<String> {
+        let url = self.mgr.forward(self.current)?;
+        self.load_id(self.current, &url);
+        Some(url)
+    }
+
+    fn reload(&mut self) -> String {
+        let url = self.url();
+        self.load_id(self.current, &url);
+        url
+    }
+
+    fn new_tab(&mut self, url: &str) {
+        let id = self.mgr.new_tab(url);
+        self.load_id(id, url);
+    }
+
+    fn close_current(&mut self) -> bool {
+        if self.mgr.len() <= 1 {
+            return false;
+        }
+        self.mgr.close(self.current);
+        self.pages.remove(&self.current);
+        self.current = self.mgr.list().first().map(|(id, _)| *id).unwrap_or(0);
+        true
+    }
+
+    fn switch(&mut self, idx: usize) {
+        if let Some((id, _)) = self.mgr.list().get(idx) {
+            self.current = *id;
+        }
+    }
+
+    fn next(&mut self) {
+        let list = self.mgr.list();
+        if list.is_empty() {
+            return;
+        }
+        let pos = list
+            .iter()
+            .position(|(id, _)| *id == self.current)
+            .unwrap_or(0);
+        self.current = list[(pos + 1) % list.len()].0;
+    }
+
+    fn click(&mut self, x: u32, y: u32) -> Vec<String> {
+        self.page_mut().click(x, y)
+    }
+}
+
+/// Strip cell index at x, if any tab lives there.
+fn tab_at(x: usize, count: usize) -> Option<usize> {
+    let i = x / TAB_W;
+    if i < count {
+        Some(i)
+    } else {
+        None
     }
 }
 
@@ -310,18 +441,33 @@ fn draw_text(buf: &mut [u32], x: usize, y: usize, s: &str, color: u32) {
     }
 }
 
-fn draw(buf: &mut [u32], page: &Page, url: &str, status: &str) {
-    fill_rect(buf, 0, 0, WIN_W, BAR, WHITE);
-    fill_rect(buf, 0, BAR + PAGE_H, WIN_W, BAR, GRAY);
-    let src = fb_to_u32(&page.fb);
-    for y in 0..PAGE_H {
-        for x in 0..PAGE_W {
-            buf[(y + BAR) * WIN_W + x] = src[y * PAGE_W + x];
+fn draw(buf: &mut [u32], tabs: &Tabs, url: &str, status: &str) {
+    fill_rect(buf, 0, 0, WIN_W, TAB_BAR, GRAY);
+    for (i, (id, u)) in tabs.mgr.list().iter().enumerate() {
+        let short: String = u.chars().take(24).collect();
+        if *id == tabs.current {
+            fill_rect(buf, i * TAB_W, 0, TAB_W, TAB_BAR, BLACK);
+            draw_text(buf, 4 + i * TAB_W, 4, &short, WHITE);
+        } else {
+            draw_text(buf, 4 + i * TAB_W, 4, &short, DARK);
         }
     }
-    draw_text(buf, 4, 4, url, BLACK);
-    fill_rect(buf, 4 + url.len() * 6, 12, 5, 1, BLACK);
-    draw_text(buf, 4, BAR + PAGE_H + 4, status, DARK);
+    fill_rect(buf, 0, TAB_BAR, WIN_W, BAR, WHITE);
+    fill_rect(buf, 0, STATUS_Y, WIN_W, BAR, GRAY);
+    let src = fb_to_u32(&tabs.page().fb);
+    for y in 0..PAGE_H {
+        for x in 0..PAGE_W {
+            buf[(y + PAGE_Y) * WIN_W + x] = src[y * PAGE_W + x];
+        }
+    }
+    draw_text(buf, 4, TAB_BAR + 4, url, BLACK);
+    fill_rect(buf, 4 + url.len() * 6, TAB_BAR + 12, 5, 1, BLACK);
+    draw_text(buf, 4, STATUS_Y + 4, status, DARK);
+}
+
+fn sync_bar(tabs: &Tabs, editor: &mut Editor, status: &mut String) {
+    editor.buf = tabs.url();
+    *status = tabs.status_line();
 }
 
 fn main() {
@@ -334,33 +480,46 @@ fn main() {
             std::process::exit(1);
         });
     window.set_target_fps(30);
-    let mut tabs = TabManager::new();
-    let tab = tabs.new_tab(&start);
-    let mut page = Page::open_url(&start).unwrap_or_else(|e| {
-        eprintln!("gui: initial load failed: {e}");
-        Page::open("").expect("blank page")
-    });
-    println!("{}", page.text);
+    let mut tabs = Tabs::open(&start);
+    println!("{}", tabs.page().text);
     let mut editor = Editor::new(start);
-    let mut status = String::from("esc quits | enter loads | alt+left/right history | f5 reloads");
+    let mut status = String::from(
+        "esc quits | enter loads | alt+arrows history | f5 reload | ctrl+t/w/tab tabs",
+    );
     let mut buf = vec![0u32; WIN_W * WIN_H];
     let mut was_down = false;
     while window.is_open() && !window.is_key_down(Key::Escape) {
         let alt = window.is_key_down(Key::LeftAlt) || window.is_key_down(Key::RightAlt);
+        let ctrl = window.is_key_down(Key::LeftCtrl) || window.is_key_down(Key::RightCtrl);
         let pressed = window.get_keys_pressed(KeyRepeat::Yes);
-        match nav_action(&pressed, alt) {
-            Some(Nav::Back) => match tabs.back(tab) {
-                Some(url) => load_url(&mut page, &mut editor, &mut status, &url),
+        match nav_action(&pressed, alt, ctrl) {
+            Some(Nav::Back) => match tabs.back() {
+                Some(_) => sync_bar(&tabs, &mut editor, &mut status),
                 None => status = String::from("no back history"),
             },
-            Some(Nav::Forward) => match tabs.forward(tab) {
-                Some(url) => load_url(&mut page, &mut editor, &mut status, &url),
+            Some(Nav::Forward) => match tabs.forward() {
+                Some(_) => sync_bar(&tabs, &mut editor, &mut status),
                 None => status = String::from("no forward history"),
             },
-            Some(Nav::Reload) => match tabs.current(tab) {
-                Some(url) => load_url(&mut page, &mut editor, &mut status, &url),
-                None => status = String::from("no page"),
-            },
+            Some(Nav::Reload) => {
+                tabs.reload();
+                sync_bar(&tabs, &mut editor, &mut status);
+            }
+            Some(Nav::NewTab) => {
+                tabs.new_tab("aerova://home");
+                sync_bar(&tabs, &mut editor, &mut status);
+            }
+            Some(Nav::CloseTab) => {
+                if tabs.close_current() {
+                    sync_bar(&tabs, &mut editor, &mut status);
+                } else {
+                    status = String::from("last tab");
+                }
+            }
+            Some(Nav::NextTab) => {
+                tabs.next();
+                sync_bar(&tabs, &mut editor, &mut status);
+            }
             None => {}
         }
         let shift = window.is_key_down(Key::LeftShift) || window.is_key_down(Key::RightShift);
@@ -369,8 +528,9 @@ fn main() {
                 Key::Backspace => editor.backspace(),
                 Key::Enter | Key::NumPadEnter => {
                     let url = normalize_url(&editor.buf);
-                    tabs.navigate(tab, &url);
-                    load_url(&mut page, &mut editor, &mut status, &url);
+                    tabs.go(&url);
+                    println!("{}", tabs.page().text);
+                    sync_bar(&tabs, &mut editor, &mut status);
                 }
                 _ => {
                     if let Some(c) = key_to_char(k, shift) {
@@ -382,17 +542,25 @@ fn main() {
         let down = window.get_mouse_down(MouseButton::Left);
         if down && !was_down {
             if let Some((mx, my)) = window.get_mouse_pos(MouseMode::Discard) {
-                let (px, py) = (mx as i32, my as i32 - BAR as i32);
-                if px >= 0 && py >= 0 {
-                    let writes = page.click(px as u32, py as u32);
-                    if !writes.is_empty() {
-                        status = writes.join(" ");
+                let (mx, my) = (mx as usize, my as usize);
+                if my < TAB_BAR {
+                    if let Some(i) = tab_at(mx, tabs.count()) {
+                        tabs.switch(i);
+                        sync_bar(&tabs, &mut editor, &mut status);
+                    }
+                } else {
+                    let (px, py) = (mx as i32, my as i32 - PAGE_Y as i32);
+                    if px >= 0 && py >= 0 {
+                        let writes = tabs.click(px as u32, py as u32);
+                        if !writes.is_empty() {
+                            status = writes.join(" ");
+                        }
                     }
                 }
             }
         }
         was_down = down;
-        draw(&mut buf, &page, &editor.buf, &status);
+        draw(&mut buf, &tabs, &editor.buf, &status);
         window
             .update_with_buffer(&buf, WIN_W, WIN_H)
             .unwrap_or_else(|e| {
@@ -430,11 +598,59 @@ mod tests {
 
     #[test]
     fn nav_gestures_resolve() {
-        assert_eq!(nav_action(&[Key::Left], true), Some(Nav::Back));
-        assert_eq!(nav_action(&[Key::Right], true), Some(Nav::Forward));
-        assert_eq!(nav_action(&[Key::F5], false), Some(Nav::Reload));
-        assert_eq!(nav_action(&[Key::Left], false), None);
-        assert_eq!(nav_action(&[], true), None);
+        assert_eq!(nav_action(&[Key::Left], true, false), Some(Nav::Back));
+        assert_eq!(nav_action(&[Key::Right], true, false), Some(Nav::Forward));
+        assert_eq!(nav_action(&[Key::F5], false, false), Some(Nav::Reload));
+        assert_eq!(nav_action(&[Key::T], false, true), Some(Nav::NewTab));
+        assert_eq!(nav_action(&[Key::W], false, true), Some(Nav::CloseTab));
+        assert_eq!(nav_action(&[Key::Tab], false, true), Some(Nav::NextTab));
+        assert_eq!(nav_action(&[Key::Left], false, false), None);
+        assert_eq!(nav_action(&[Key::T], false, false), None);
+        assert_eq!(nav_action(&[], true, true), None);
+    }
+
+    #[test]
+    fn tabs_open_switch_close() {
+        let mut t = Tabs::open("aerova://home");
+        assert_eq!(t.count(), 1);
+        assert!(t.page().text.contains("Welcome"));
+        t.new_tab("bogus://nope");
+        assert_eq!(t.count(), 2);
+        assert_eq!(t.url(), "bogus://nope");
+        t.switch(0);
+        assert_eq!(t.url(), "aerova://home");
+        assert!(t.page().text.contains("Welcome"));
+        t.next();
+        assert_eq!(t.url(), "bogus://nope");
+        t.next();
+        assert_eq!(t.url(), "aerova://home");
+        t.switch(1);
+        assert!(t.close_current());
+        assert_eq!(t.count(), 1);
+        assert!(!t.close_current());
+        assert_eq!(t.count(), 1);
+    }
+
+    #[test]
+    fn tabs_go_back_forward() {
+        let mut t = Tabs::open("aerova://home");
+        t.go("bogus://nope");
+        assert_eq!(t.url(), "bogus://nope");
+        assert_eq!(t.back(), Some("aerova://home".to_string()));
+        assert_eq!(t.url(), "aerova://home");
+        assert!(t.page().text.contains("Welcome"));
+        assert_eq!(t.forward(), Some("bogus://nope".to_string()));
+        assert_eq!(t.back(), Some("aerova://home".to_string()));
+        assert_eq!(t.back(), None);
+    }
+
+    #[test]
+    fn tab_strip_cells() {
+        assert_eq!(tab_at(0, 3), Some(0));
+        assert_eq!(tab_at(159, 3), Some(0));
+        assert_eq!(tab_at(160, 3), Some(1));
+        assert_eq!(tab_at(320, 2), None);
+        assert_eq!(tab_at(0, 0), None);
     }
 
     #[test]
