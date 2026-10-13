@@ -387,6 +387,16 @@ impl Tabs {
     }
 }
 
+/// Keys pressed since the previous frame: nav gestures fire once per press,
+// while typing keeps OS repeat.
+fn fresh_keys(pressed: &[Key], prev: &[Key]) -> Vec<Key> {
+    pressed
+        .iter()
+        .filter(|k| !prev.contains(*k))
+        .copied()
+        .collect()
+}
+
 /// Strip cell index at x, if any tab lives there.
 fn tab_at(x: usize, count: usize) -> Option<usize> {
     let i = x / TAB_W;
@@ -488,11 +498,14 @@ fn main() {
     );
     let mut buf = vec![0u32; WIN_W * WIN_H];
     let mut was_down = false;
+    let mut prev: Vec<Key> = Vec::new();
     while window.is_open() && !window.is_key_down(Key::Escape) {
         let alt = window.is_key_down(Key::LeftAlt) || window.is_key_down(Key::RightAlt);
         let ctrl = window.is_key_down(Key::LeftCtrl) || window.is_key_down(Key::RightCtrl);
         let pressed = window.get_keys_pressed(KeyRepeat::Yes);
-        match nav_action(&pressed, alt, ctrl) {
+        let fresh = fresh_keys(&pressed, &prev);
+        prev = pressed.clone();
+        match nav_action(&fresh, alt, ctrl) {
             Some(Nav::Back) => match tabs.back() {
                 Some(_) => sync_bar(&tabs, &mut editor, &mut status),
                 None => status = String::from("no back history"),
@@ -510,11 +523,11 @@ fn main() {
                 sync_bar(&tabs, &mut editor, &mut status);
             }
             Some(Nav::CloseTab) => {
-                if tabs.close_current() {
-                    sync_bar(&tabs, &mut editor, &mut status);
-                } else {
-                    status = String::from("last tab");
+                if tabs.count() <= 1 {
+                    break;
                 }
+                tabs.close_current();
+                sync_bar(&tabs, &mut editor, &mut status);
             }
             Some(Nav::NextTab) => {
                 tabs.next();
@@ -522,19 +535,21 @@ fn main() {
             }
             None => {}
         }
-        let shift = window.is_key_down(Key::LeftShift) || window.is_key_down(Key::RightShift);
-        for k in pressed {
-            match k {
-                Key::Backspace => editor.backspace(),
-                Key::Enter | Key::NumPadEnter => {
-                    let url = normalize_url(&editor.buf);
-                    tabs.go(&url);
-                    println!("{}", tabs.page().text);
-                    sync_bar(&tabs, &mut editor, &mut status);
-                }
-                _ => {
-                    if let Some(c) = key_to_char(k, shift) {
-                        editor.push(c);
+        if !(ctrl || alt) {
+            let shift = window.is_key_down(Key::LeftShift) || window.is_key_down(Key::RightShift);
+            for k in pressed {
+                match k {
+                    Key::Backspace => editor.backspace(),
+                    Key::Enter | Key::NumPadEnter => {
+                        let url = normalize_url(&editor.buf);
+                        tabs.go(&url);
+                        println!("{}", tabs.page().text);
+                        sync_bar(&tabs, &mut editor, &mut status);
+                    }
+                    _ => {
+                        if let Some(c) = key_to_char(k, shift) {
+                            editor.push(c);
+                        }
                     }
                 }
             }
@@ -642,6 +657,13 @@ mod tests {
         assert_eq!(t.forward(), Some("bogus://nope".to_string()));
         assert_eq!(t.back(), Some("aerova://home".to_string()));
         assert_eq!(t.back(), None);
+    }
+
+    #[test]
+    fn repeat_keys_are_not_fresh() {
+        let prev = vec![Key::LeftCtrl, Key::T];
+        assert!(fresh_keys(&[Key::LeftCtrl, Key::T], &prev).is_empty());
+        assert_eq!(fresh_keys(&[Key::LeftCtrl, Key::W], &prev), vec![Key::W]);
     }
 
     #[test]
