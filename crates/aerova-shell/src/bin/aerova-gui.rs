@@ -78,6 +78,14 @@ fn glyph(c: u8) -> Option<[u8; 7]> {
         b';' => [0x00, 0x0C, 0x0C, 0x00, 0x0C, 0x04, 0x08],
         b'|' => [0x04, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04],
         b'"' => [0x0A, 0x0A, 0x00, 0x00, 0x00, 0x00, 0x00],
+        b'\\' => [0x10, 0x08, 0x08, 0x04, 0x02, 0x02, 0x01],
+        b'[' => [0x0E, 0x08, 0x08, 0x08, 0x08, 0x08, 0x0E],
+        b']' => [0x0E, 0x02, 0x02, 0x02, 0x02, 0x02, 0x0E],
+        b'`' => [0x04, 0x04, 0x08, 0x00, 0x00, 0x00, 0x00],
+        b'^' => [0x04, 0x0A, 0x11, 0x00, 0x00, 0x00, 0x00],
+        b'$' => [0x04, 0x0F, 0x14, 0x0E, 0x05, 0x1E, 0x04],
+        b'{' => [0x02, 0x04, 0x04, 0x08, 0x04, 0x04, 0x02],
+        b'}' => [0x08, 0x04, 0x04, 0x02, 0x04, 0x04, 0x08],
         _ => return None,
     })
 }
@@ -467,8 +475,44 @@ mod tests {
     }
 
     #[test]
+    fn every_typable_char_has_a_glyph() {
+        let keys = [
+            Key::A,
+            Key::Z,
+            Key::Key0,
+            Key::Key9,
+            Key::Space,
+            Key::Minus,
+            Key::Equal,
+            Key::Slash,
+            Key::Period,
+            Key::Comma,
+            Key::Semicolon,
+            Key::Apostrophe,
+            Key::LeftBracket,
+            Key::RightBracket,
+            Key::Backslash,
+            Key::Backquote,
+            Key::NumPad0,
+            Key::NumPadDot,
+            Key::NumPadSlash,
+            Key::NumPadAsterisk,
+            Key::NumPadMinus,
+            Key::NumPadPlus,
+        ];
+        for k in keys {
+            for shift in [false, true] {
+                if let Some(c) = key_to_char(k, shift) {
+                    let b = (c as u8).to_ascii_uppercase();
+                    assert!(glyph(b).is_some(), "missing glyph for {c:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn unknown_glyph_is_none() {
-        assert!(glyph(b'{').is_none());
+        assert!(glyph(0x00).is_none());
         assert!(glyph(b'a').is_none());
     }
 }
