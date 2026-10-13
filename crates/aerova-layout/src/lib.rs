@@ -19,6 +19,9 @@ pub struct BoxNode {
     pub h: u32,
     /// Specified style pairs for this box.
     pub style: Vec<(String, String)>,
+    /// Snapshot index of the producing element (`None` for anonymous boxes);
+    /// text boxes carry their enclosing element's index for click dispatch.
+    pub el: Option<usize>,
     /// Children.
     pub children: Vec<BoxNode>,
 }
@@ -48,9 +51,11 @@ impl BoxNode {
 }
 
 /// Lay out document top-to-bottom with CSS rules. Width 800, row 20px default.
+/// Element boxes take snapshot indices in pre-order, matching `dom_snapshot`.
 #[must_use]
 pub fn layout(doc: &Document, rules: &[Rule]) -> Vec<BoxNode> {
     let mut y = 0;
+    let mut next = 0usize;
     let mut out = Vec::new();
     for n in &doc.nodes {
         if let Node::Element { tag, .. } = n {
@@ -58,9 +63,39 @@ pub fn layout(doc: &Document, rules: &[Rule]) -> Vec<BoxNode> {
                 continue;
             }
         }
-        out.push(layout_node(n, 0, &mut y, rules));
+        out.push(layout_node(n, 0, &mut y, rules, None, &mut next));
     }
     out
+}
+
+/// Topmost snapshot index at `(x, y)`, or `None` for empty space.
+/// Children paint over parents and later siblings over earlier ones.
+#[must_use]
+pub fn hit_test(boxes: &[BoxNode], x: u32, y: u32) -> Option<usize> {
+    for b in boxes.iter().rev() {
+        if let Some(hit) = hit_box(b, x, y) {
+            return Some(hit);
+        }
+    }
+    None
+}
+
+fn hit_box(b: &BoxNode, x: u32, y: u32) -> Option<usize> {
+    if x < b.x || y < b.y || x - b.x >= b.w || y - b.y >= b.h {
+        return None;
+    }
+    for c in b.children.iter().rev() {
+        if let Some(hit) = hit_box(c, x, y) {
+            return Some(hit);
+        }
+    }
+    b.el
+}
+
+fn alloc_index(next: &mut usize) -> usize {
+    let i = *next;
+    *next += 1;
+    i
 }
 
 type Attrs = Vec<(String, String)>;
@@ -115,7 +150,14 @@ fn flex_direction(tag: &str, attrs: &Attrs, rules: &[Rule]) -> &'static str {
     "row"
 }
 
-fn layout_node(n: &Node, x: u32, y: &mut u32, rules: &[Rule]) -> BoxNode {
+fn layout_node(
+    n: &Node,
+    x: u32,
+    y: &mut u32,
+    rules: &[Rule],
+    cur: Option<usize>,
+    next: &mut usize,
+) -> BoxNode {
     match n {
         Node::Text(t) => {
             let b = BoxNode {
@@ -125,6 +167,7 @@ fn layout_node(n: &Node, x: u32, y: &mut u32, rules: &[Rule]) -> BoxNode {
                 w: 800u32.saturating_sub(x),
                 h: 20,
                 style: Vec::new(),
+                el: cur,
                 children: vec![],
             };
             *y += 20;
@@ -144,12 +187,14 @@ fn layout_node(n: &Node, x: u32, y: &mut u32, rules: &[Rule]) -> BoxNode {
                     w: 0,
                     h: 0,
                     style: specified_styles(tag, attrs, rules),
+                    el: None,
                     children: vec![],
                 };
             }
             if is_flex_tag(tag, attrs, rules) && flex_direction(tag, attrs, rules) == "row" {
-                return layout_flex_row(tag, attrs, children, x, y, rules);
+                return layout_flex_row(tag, attrs, children, x, y, rules, next);
             }
+            let mine = Some(alloc_index(next));
             let start = *y;
             let style = specified_styles(tag, attrs, rules);
             let w = styled_width(tag, attrs, x, rules);
@@ -160,7 +205,7 @@ fn layout_node(n: &Node, x: u32, y: &mut u32, rules: &[Rule]) -> BoxNode {
                         continue;
                     }
                 }
-                kids.push(layout_node(c, x + 10, y, rules));
+                kids.push(layout_node(c, x + 10, y, rules, mine, next));
             }
             let content_h = *y - start;
             let wanted = styled_height(tag, attrs, rules).unwrap_or(0);
@@ -179,6 +224,7 @@ fn layout_node(n: &Node, x: u32, y: &mut u32, rules: &[Rule]) -> BoxNode {
                 w,
                 h,
                 style,
+                el: mine,
                 children: kids,
             }
         }
@@ -193,7 +239,9 @@ fn layout_flex_row(
     x: u32,
     y: &mut u32,
     rules: &[Rule],
+    next: &mut usize,
 ) -> BoxNode {
+    let mine = Some(alloc_index(next));
     let start_y = *y;
     let style = specified_styles(tag, attrs, rules);
     let w = styled_width(tag, attrs, x, rules);
@@ -221,7 +269,7 @@ fn layout_flex_row(
                 .min(w.saturating_sub(cx - x)),
         };
         let mut row_y = start_y;
-        let mut item = layout_flex_item(c, cx, &mut row_y, item_w, rules);
+        let mut item = layout_flex_item(c, cx, &mut row_y, item_w, rules, mine, next);
         item.x = cx;
         item.y = start_y;
         if item.w == 0 || item.w > item_w {
@@ -241,11 +289,20 @@ fn layout_flex_row(
         w,
         h,
         style,
+        el: mine,
         children: kids,
     }
 }
 
-fn layout_flex_item(n: &Node, x: u32, _row_y: &mut u32, cap_w: u32, rules: &[Rule]) -> BoxNode {
+fn layout_flex_item(
+    n: &Node,
+    x: u32,
+    _row_y: &mut u32,
+    cap_w: u32,
+    rules: &[Rule],
+    cur: Option<usize>,
+    next: &mut usize,
+) -> BoxNode {
     match n {
         Node::Text(_) => BoxNode {
             kind: "#text".into(),
@@ -254,6 +311,7 @@ fn layout_flex_item(n: &Node, x: u32, _row_y: &mut u32, cap_w: u32, rules: &[Rul
             w: cap_w,
             h: 20,
             style: Vec::new(),
+            el: cur,
             children: vec![],
         },
         Node::Element {
@@ -261,6 +319,7 @@ fn layout_flex_item(n: &Node, x: u32, _row_y: &mut u32, cap_w: u32, rules: &[Rul
             attrs,
             children,
         } => {
+            let mine = Some(alloc_index(next));
             let style = specified_styles(tag, attrs, rules);
             let mut inner_y = 0;
             let mut kids = Vec::new();
@@ -270,7 +329,7 @@ fn layout_flex_item(n: &Node, x: u32, _row_y: &mut u32, cap_w: u32, rules: &[Rul
                         continue;
                     }
                 }
-                kids.push(layout_node(c, 0, &mut inner_y, rules));
+                kids.push(layout_node(c, 0, &mut inner_y, rules, mine, next));
             }
             let content_h = inner_y;
             let wanted = styled_height(tag, attrs, rules).unwrap_or(0);
@@ -289,6 +348,7 @@ fn layout_flex_item(n: &Node, x: u32, _row_y: &mut u32, cap_w: u32, rules: &[Rul
                 w,
                 h,
                 style,
+                el: mine,
                 children: kids,
             }
         }
@@ -416,5 +476,65 @@ mod tests {
         let boxes = layout(&doc, &rules);
         assert!(boxes[0].is_flex());
         assert_eq!(boxes[0].children[0].y, boxes[0].children[1].y);
+    }
+
+    fn nested_doc() -> Document {
+        Document {
+            nodes: vec![Node::Element {
+                tag: "div".into(),
+                attrs: vec![],
+                children: vec![
+                    Node::Element {
+                        tag: "span".into(),
+                        attrs: vec![],
+                        children: vec![Node::Text("a".into())],
+                    },
+                    Node::Element {
+                        tag: "p".into(),
+                        attrs: vec![],
+                        children: vec![Node::Text("b".into())],
+                    },
+                ],
+            }],
+        }
+    }
+
+    fn preorder_els(boxes: &[BoxNode], out: &mut Vec<Option<usize>>) {
+        for b in boxes {
+            out.push(b.el);
+            preorder_els(&b.children, out);
+        }
+    }
+
+    #[test]
+    fn elements_carry_snapshot_indices_in_order() {
+        for rules in [vec![], aerova_css::parse("div { display: flex; }")] {
+            let boxes = layout(&nested_doc(), &rules);
+            let mut els = Vec::new();
+            preorder_els(&boxes, &mut els);
+            assert_eq!(
+                els,
+                vec![Some(0), Some(1), Some(1), Some(2), Some(2)],
+                "rules: {rules:?}"
+            );
+        }
+    }
+
+    fn find_kind<'a>(boxes: &'a [BoxNode], kind: &str) -> Option<&'a BoxNode> {
+        boxes
+            .iter()
+            .find(|b| b.kind == kind)
+            .or_else(|| boxes.iter().find_map(|b| find_kind(&b.children, kind)))
+    }
+
+    #[test]
+    fn hit_test_prefers_topmost_child() {
+        let boxes = layout(&nested_doc(), &[]);
+        let span = find_kind(&boxes, "span").unwrap();
+        assert_eq!(span.el, Some(1));
+        assert_eq!(hit_test(&boxes, span.x + 1, span.y + 1), Some(1));
+        let text = find_kind(&span.children, "#text").unwrap();
+        assert_eq!(hit_test(&boxes, text.x + 1, text.y + 1), Some(1));
+        assert_eq!(hit_test(&boxes, 10, 500), None);
     }
 }

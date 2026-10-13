@@ -382,16 +382,18 @@ while (__queue.length > 0 && __fired < 10000) {
 }
 "##;
 
-    /// Install bindings + DOM snapshot, then eval main script, timers, listeners.
-    pub fn run_with_bindings(
-        source: &str,
-        title: &str,
-        dom: &[DomEl],
-    ) -> (Result<String, String>, Vec<String>, Vec<String>) {
-        WRITES.with(|w| w.borrow_mut().clear());
-        LOGS.with(|l| l.borrow_mut().clear());
-        let mut ctx = Context::default();
-        let setup = |ctx: &mut Context| -> Result<(), String> {
+    /// A live JS world: one context kept across runs so clicks dispatch into
+    /// listeners registered by page scripts.
+    pub struct JsSession {
+        ctx: Context,
+    }
+
+    impl JsSession {
+        /// Install bindings + DOM snapshot.
+        pub fn new(title: &str, dom: &[DomEl]) -> Result<Self, String> {
+            WRITES.with(|w| w.borrow_mut().clear());
+            LOGS.with(|l| l.borrow_mut().clear());
+            let mut ctx = Context::default();
             ctx.register_global_callable(
                 js_string!("__aerova_write"),
                 1,
@@ -413,24 +415,62 @@ while (__queue.length > 0 && __fired < 10000) {
                 .map_err(|e| format!("boa-bind: {e}"))?;
             ctx.eval(Source::from_bytes(SHIM))
                 .map_err(|e| format!("boa-bind: {e}"))?;
-            Ok(())
-        };
-        if let Err(e) = setup(&mut ctx) {
-            return (Err(e), vec![], vec![]);
+            Ok(Self { ctx })
         }
-        let result = match ctx.eval(Source::from_bytes(source)) {
-            Ok(v) => v
-                .to_string(&mut ctx)
-                .map(|s| s.to_std_string_escaped())
-                .map_err(|e| format!("boa-stringify: {e}")),
-            Err(e) => Err(format!("boa-eval: {e}")),
+
+        fn take_output(&mut self) -> (Vec<String>, Vec<String>) {
+            let writes = WRITES.with(|w| std::mem::take(&mut *w.borrow_mut()));
+            let logs = LOGS.with(|l| std::mem::take(&mut *l.borrow_mut()));
+            STUB_WRITES.with(|w| w.borrow_mut().extend(writes.clone()));
+            (writes, logs)
+        }
+
+        /// Eval one script, returning value + writes/logs since the last take.
+        pub fn run(&mut self, source: &str) -> (Result<String, String>, Vec<String>, Vec<String>) {
+            let result = match self.ctx.eval(Source::from_bytes(source)) {
+                Ok(v) => v
+                    .to_string(&mut self.ctx)
+                    .map(|s| s.to_std_string_escaped())
+                    .map_err(|e| format!("boa-stringify: {e}")),
+                Err(e) => Err(format!("boa-eval: {e}")),
+            };
+            let (writes, logs) = self.take_output();
+            (result, writes, logs)
+        }
+
+        /// Fire `DOMContentLoaded` + drain timers in this context.
+        pub fn fire(&mut self) -> (Vec<String>, Vec<String>) {
+            let _ = self.ctx.eval(Source::from_bytes(FIRE));
+            self.take_output()
+        }
+
+        /// Dispatch `typ` on snapshot element `idx` with bubbling.
+        /// Returns (default-not-prevented, writes, logs).
+        pub fn dispatch(&mut self, idx: usize, typ: &str) -> (bool, Vec<String>, Vec<String>) {
+            let src = format!("__wrap({idx}).dispatchEvent({{type:{typ:?}}})");
+            let ok = match self.ctx.eval(Source::from_bytes(src.as_str())) {
+                Ok(v) => v.to_boolean(),
+                Err(_) => false,
+            };
+            let (writes, logs) = self.take_output();
+            (ok, writes, logs)
+        }
+    }
+
+    /// Install bindings + DOM snapshot, then eval main script, timers, listeners.
+    pub fn run_with_bindings(
+        source: &str,
+        title: &str,
+        dom: &[DomEl],
+    ) -> (Result<String, String>, Vec<String>, Vec<String>) {
+        let mut s = match JsSession::new(title, dom) {
+            Ok(s) => s,
+            Err(e) => return (Err(e), vec![], vec![]),
         };
-        // Drain timers (and the single DOMContentLoaded) in the same context,
-        // so callbacks registered by scripts run with the same bindings.
-        let _ = ctx.eval(Source::from_bytes(FIRE));
-        let writes = WRITES.with(|w| std::mem::take(&mut *w.borrow_mut()));
-        let logs = LOGS.with(|l| std::mem::take(&mut *l.borrow_mut()));
-        STUB_WRITES.with(|w| w.borrow_mut().extend(writes.clone()));
+        let (result, mut writes, mut logs) = s.run(source);
+        let (fw, fl) = s.fire();
+        writes.extend(fw);
+        logs.extend(fl);
         (result, writes, logs)
     }
 }
@@ -439,6 +479,42 @@ while (__queue.length > 0 && __fired < 10000) {
 /// Evaluate with Boa engine. Returns stringified value or error string.
 pub fn eval_boa(source: &str) -> Result<String, String> {
     boa_impl::eval_boa(source)
+}
+
+#[cfg(feature = "boa")]
+pub use boa_impl::JsSession;
+
+#[cfg(not(feature = "boa"))]
+/// Stub session: no live context; dispatch degrades to a no-op.
+pub struct JsSession;
+
+#[cfg(not(feature = "boa"))]
+impl JsSession {
+    /// Always succeeds; kept for call-shape parity with Boa.
+    pub fn new(_title: &str, _dom: &[DomEl]) -> Result<Self, String> {
+        Ok(Self)
+    }
+
+    /// Scan `document.write` / `int+int`, like `run_script_with_dom`.
+    pub fn run(&mut self, source: &str) -> (Result<String, String>, Vec<String>, Vec<String>) {
+        let o = run_script_with_dom(source, "", &[]);
+        let r = if o.failed {
+            Err(o.result.clone())
+        } else {
+            Ok(o.result.clone())
+        };
+        (r, o.writes, o.logs)
+    }
+
+    /// No timers without Boa.
+    pub fn fire(&mut self) -> (Vec<String>, Vec<String>) {
+        (Vec::new(), Vec::new())
+    }
+
+    /// No listeners without Boa.
+    pub fn dispatch(&mut self, _idx: usize, _typ: &str) -> (bool, Vec<String>, Vec<String>) {
+        (false, Vec::new(), Vec::new())
+    }
 }
 
 /// Output of a script run with DOM bindings.

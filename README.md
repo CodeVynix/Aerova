@@ -30,6 +30,8 @@ cargo xtask fmt
 | JS Boa | `cargo run -q -p aerova-shell --features aerova-js/boa -- js "(function(a,b){return a*b;})(6,7)"` | `42` |
 | Tabs isolation | `./target/debug/aerova tabs demo` | `tab 0 ok` + `tab 1 isolated failure (tab survives)` |
 | Lumora blit | `./target/debug/aerova lumora-blit --shot /tmp/lum.ppm` | `lumora blit 800x600` |
+| GUI window | `cargo run -q -p aerova-shell --features gui,boa --bin aerova-gui -- aerova://home` | window with URL bar, esc quits |
+| GUI window | `cargo run -q -p aerova-shell --features gui,boa --bin aerova-gui -- aerova://home` | window with URL bar, esc quits |
 
 ## Layout
 

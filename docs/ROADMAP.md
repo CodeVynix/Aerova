@@ -9,15 +9,15 @@
 - Style: cascade (`*`+tag), `height/width`, `background`, `<style>` extract, styled PPM
 - Tabs: `TabManager` + `PerTabThread` panic containment + `tabs demo`
 - Lumora: frozen `BlitTarget` ABI + `MemorySurface` + `blit_to_raw_framebuffer` + `lumora-blit`
+- GUI shell: `minifb` window (`gui` feature) on the engine framebuffer, URL bar + status line, click-to-dispatch via live `Page`
 
 ## Next (ranked)
 
 1. **JS DOM bindings (HIGHLY RECOMMENDED)** — expose `document/window/timers` to Boa, run `<script>` during `render_text`. Unblocks real pages.
 2. **Flexbox + block margin/padding (RECOMMENDED)** — extend `layout` beyond stacking + height/width. Big visual win.
 3. **Search ranking v2 (RECOMMENDED)** — BM25 + title boost + `aerova://search?q=` page. Keeps std-only or `tantivy` optional.
-4. **Desktop GUI shell (NEUTRAL)** — `winit/wgpu` window after CLI solid. Needs WSLg/GPU test.
-5. **Own JS VM (LATER)** — behind `own-vm` flag vs Boa. Do not block web compat on it.
-6. **Global crawler (HIGHLY DISCOURAGED now)** — needs fleet + politeness + spam. Stay local + explicit crawl list.
+4. **Own JS VM (LATER)** — behind `own-vm` flag vs Boa. Do not block web compat on it.
+5. **Global crawler (HIGHLY DISCOURAGED now)** — needs fleet + politeness + spam. Stay local + explicit crawl list.
 
 ## Lumora gating
 

@@ -355,6 +355,88 @@ pub fn render_text(
     (text, boxes, fb)
 }
 
+/// A loaded page with a live JS world: scripts run once at open, clicks
+/// dispatch into the same context so registered listeners fire.
+pub struct Page {
+    /// Rendered text (grows with `document.write` from clicks).
+    pub text: String,
+    /// Layout boxes, tagged with snapshot indices for hit-testing.
+    pub boxes: Vec<aerova_layout::BoxNode>,
+    /// Painted pixels (layout never changes after open).
+    pub fb: aerova_paint::Framebuffer,
+    js: aerova_js::JsSession,
+}
+
+impl Page {
+    /// Parse HTML, run scripts once, lay out + paint.
+    /// # Errors
+    /// Returns JS setup error string.
+    pub fn open(html: &str) -> Result<Self, String> {
+        let doc = aerova_html::parse(html);
+        let mut title: Option<String> = None;
+        for n in &doc.nodes {
+            find_title(n, &mut title);
+        }
+        let dom = dom_snapshot(&doc);
+        let mut js = aerova_js::JsSession::new(title.as_deref().unwrap_or(""), &dom)?;
+        let mut text = visible_text(&doc);
+        let css_text = extract_css(&doc);
+        let rules = aerova_css::parse(&css_text);
+        for s in extract_scripts(&doc) {
+            let (_, writes, _) = js.run(&s);
+            for w in &writes {
+                if !text.is_empty() {
+                    text.push(' ');
+                }
+                text.push_str(w);
+            }
+        }
+        let (fwrites, _) = js.fire();
+        for w in &fwrites {
+            if !text.is_empty() {
+                text.push(' ');
+            }
+            text.push_str(w);
+        }
+        let boxes = aerova_layout::layout(&doc, &rules);
+        let mut fb = aerova_paint::Framebuffer::new(800, 600);
+        for b in &boxes {
+            paint_tree(&mut fb, b);
+        }
+        Ok(Self {
+            text,
+            boxes,
+            fb,
+            js,
+        })
+    }
+
+    /// Click at page coords: hit-test, dispatch `click` with bubbling.
+    /// Returns new writes (also appended to `text`).
+    pub fn click(&mut self, x: u32, y: u32) -> Vec<String> {
+        let Some(idx) = aerova_layout::hit_test(&self.boxes, x, y) else {
+            return Vec::new();
+        };
+        let (_, writes, _) = self.js.dispatch(idx, "click");
+        for w in &writes {
+            if !self.text.is_empty() {
+                self.text.push(' ');
+            }
+            self.text.push_str(w);
+        }
+        writes
+    }
+
+    /// Fetch URL then open.
+    /// # Errors
+    /// Returns fetch or JS setup error string.
+    pub fn open_url(url: &str) -> Result<Self, String> {
+        let (bytes, _ct) = aerova_net::fetch(url).map_err(|e| e.to_string())?;
+        let html = String::from_utf8_lossy(&bytes).to_string();
+        Self::open(&html)
+    }
+}
+
 /// Load URL then render.
 /// # Errors
 /// Returns fetch error string.
@@ -516,6 +598,47 @@ mod tests {
         assert!(render_isolated("bogus://nope", &policy).is_err());
         // Other tab still works after a failure.
         assert!(render_isolated("aerova://home", &policy).is_ok());
+    }
+
+    #[test]
+    fn page_click_without_js_is_quiet() {
+        let mut page = Page::open("<div id=\"c\">x</div>").unwrap();
+        assert!(page.text.contains('x'));
+        assert!(page.click(5, 5).is_empty());
+        assert!(page.click(10, 500).is_empty());
+    }
+
+    #[cfg(feature = "boa")]
+    fn box_center(boxes: &[aerova_layout::BoxNode], el: usize) -> Option<(u32, u32)> {
+        for b in boxes {
+            if b.el == Some(el) {
+                return Some((b.x + b.w / 2, b.y + b.h / 2));
+            }
+            if let Some(p) = box_center(&b.children, el) {
+                return Some(p);
+            }
+        }
+        None
+    }
+
+    #[cfg(feature = "boa")]
+    #[test]
+    fn page_click_dispatches_with_bubbling() {
+        let html = r#"<div id="p"><div id="c">x</div></div><script>document.getElementById('p').addEventListener('click', function (ev) { document.write('p:' + ev.target.id); }); document.getElementById('c').addEventListener('click', function () { document.write('self'); });</script>"#;
+        let mut page = Page::open(html).unwrap();
+        let (cx, cy) = box_center(&page.boxes, 1).unwrap();
+        let writes = page.click(cx, cy);
+        assert!(writes.contains(&"self".to_string()));
+        assert!(writes.contains(&"p:c".to_string()));
+        assert!(page.text.contains("self"));
+    }
+
+    #[cfg(feature = "boa")]
+    #[test]
+    fn page_click_empty_space_dispatches_nothing() {
+        let html = r#"<div id="p">x</div><script>document.getElementById('p').addEventListener('click', function () { document.write('hit'); });</script>"#;
+        let mut page = Page::open(html).unwrap();
+        assert!(page.click(10, 500).is_empty());
     }
 
     #[cfg(feature = "boa")]

@@ -7,8 +7,19 @@ edition = "2021"
 name = "aerova"
 path = "src/main.rs"
 
+[[bin]]
+name = "aerova-gui"
+path = "src/bin/aerova-gui.rs"
+required-features = ["gui"]
+
 [dependencies]
 aerova-engine = { path = "../aerova-engine" }
 aerova-search = { path = "../aerova-search" }
 aerova-js = { path = "../aerova-js" }
 aerova-lumora = { path = "../aerova-lumora" }
+aerova-paint = { path = "../aerova-paint" }
+minifb = { version = "0.29", optional = true }
+
+[features]
+gui = ["dep:minifb"]
+boa = ["aerova-js/boa", "aerova-engine/boa"]
