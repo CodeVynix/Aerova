@@ -8,13 +8,67 @@ type OpenElement = (String, Vec<(String, String)>, Vec<Node>);
 
 fn parse_tag(s: &str) -> (String, Vec<(String, String)>) {
     let s = s.trim().trim_end_matches('/').trim();
-    let mut parts = s.split_whitespace();
-    let tag = parts.next().unwrap_or("div").to_lowercase();
+    let mut chars = s.chars().peekable();
+    let mut tag = String::new();
+    while let Some(&c) = chars.peek() {
+        if c.is_whitespace() {
+            break;
+        }
+        tag.push(c);
+        chars.next();
+    }
+    let tag = if tag.is_empty() {
+        "div".to_string()
+    } else {
+        tag.to_lowercase()
+    };
     let mut attrs = Vec::new();
-    for p in parts {
-        if let Some((k, v)) = p.split_once('=') {
-            let v = v.trim_matches('"').trim_matches('\'').to_string();
-            attrs.push((k.to_lowercase(), v));
+    loop {
+        while chars.peek().is_some_and(|c| c.is_whitespace()) {
+            chars.next();
+        }
+        if chars.peek().is_none() {
+            break;
+        }
+        let mut key = String::new();
+        while let Some(&c) = chars.peek() {
+            if c == '=' || c.is_whitespace() {
+                break;
+            }
+            key.push(c);
+            chars.next();
+        }
+        while chars.peek().is_some_and(|c| c.is_whitespace()) {
+            chars.next();
+        }
+        if chars.peek() == Some(&'=') {
+            chars.next();
+            while chars.peek().is_some_and(|c| c.is_whitespace()) {
+                chars.next();
+            }
+            let mut val = String::new();
+            if chars.peek() == Some(&'"') || chars.peek() == Some(&'\'') {
+                let q = chars.next().unwrap_or('"');
+                for c in chars.by_ref() {
+                    if c == q {
+                        break;
+                    }
+                    val.push(c);
+                }
+            } else {
+                while let Some(&c) = chars.peek() {
+                    if c.is_whitespace() {
+                        break;
+                    }
+                    val.push(c);
+                    chars.next();
+                }
+            }
+            if !key.is_empty() {
+                attrs.push((key.to_lowercase(), val));
+            }
+        } else if !key.is_empty() {
+            attrs.push((key.to_lowercase(), String::new()));
         }
     }
     (tag, attrs)
@@ -127,5 +181,34 @@ mod tests {
     fn malformed_never_panics() {
         let d = parse("<div><p>oops");
         assert!(d.count() >= 2);
+    }
+
+    fn element_attrs(html: &str) -> Vec<(String, String)> {
+        match &parse(html).nodes[..] {
+            [Node::Element { attrs, .. }] => attrs.clone(),
+            _ => panic!("want one element: {html}"),
+        }
+    }
+
+    #[test]
+    fn quoted_attr_values_keep_spaces() {
+        let attrs = element_attrs("<div style=\"background: blue; height: 20px;\">hi</div>");
+        assert_eq!(
+            attrs,
+            vec![(
+                "style".to_string(),
+                "background: blue; height: 20px;".to_string()
+            )]
+        );
+        let attrs = element_attrs("<a href='x y'>l</a>");
+        assert_eq!(attrs, vec![("href".to_string(), "x y".to_string())]);
+    }
+
+    #[test]
+    fn unquoted_and_bare_attrs_behave() {
+        let attrs = element_attrs("<a href=http://x>l</a>");
+        assert_eq!(attrs, vec![("href".to_string(), "http://x".to_string())]);
+        let attrs = element_attrs("<button disabled>x</button>");
+        assert_eq!(attrs, vec![("disabled".to_string(), String::new())]);
     }
 }

@@ -553,6 +553,57 @@ mod tests {
         assert_eq!(&fb.pixels[i..i + 3], &[255, 0, 0]);
     }
 
+    fn find_box<'a>(
+        boxes: &'a [aerova_layout::BoxNode],
+        kind: &str,
+    ) -> Option<&'a aerova_layout::BoxNode> {
+        for b in boxes {
+            if b.kind == kind {
+                return Some(b);
+            }
+            if let Some(hit) = find_box(&b.children, kind) {
+                return Some(hit);
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn descendant_rule_paints_nested_only() {
+        let html = "<style>div p { background: red; height: 30px; }</style><div><p>hi</p></div><p>plain</p>";
+        let (text, boxes, fb) = render_text(html);
+        assert!(text.contains("hi"));
+        let nested = find_box(&boxes, "p").unwrap();
+        assert_eq!(nested.h, 30);
+        let i = ((nested.y * 800 + nested.x) as usize) * 4;
+        assert_eq!(&fb.pixels[i..i + 3], &[255, 0, 0]);
+        let plain = boxes.iter().find(|b| b.kind == "p").unwrap();
+        assert_eq!(plain.h, 20);
+    }
+
+    #[test]
+    fn inline_style_beats_stylesheet() {
+        let html = "<style>div { background: red; height: 40px; }</style><div style=\"background: blue; height: 20px;\">hi</div>";
+        let (_, boxes, fb) = render_text(html);
+        let div_box = boxes.iter().find(|b| b.kind == "div").unwrap();
+        assert_eq!(div_box.h, 20);
+        let i = ((div_box.y * 800 + div_box.x) as usize) * 4;
+        assert_eq!(&fb.pixels[i..i + 3], &[0, 0, 255]);
+    }
+
+    #[test]
+    fn attr_selector_paints_link_with_href() {
+        let html =
+            "<style>a[href] { background: red; height: 25px; }</style><a href=\"x\">l</a><a>n</a>";
+        let (_, boxes, fb) = render_text(html);
+        let link = boxes.iter().find(|b| b.kind == "a" && b.h == 25).unwrap();
+        let i = ((link.y * 800 + link.x) as usize) * 4;
+        assert_eq!(&fb.pixels[i..i + 3], &[255, 0, 0]);
+        let bare = boxes.iter().find(|b| b.kind == "a" && b.h == 20).unwrap();
+        let j = ((bare.y * 800 + bare.x) as usize) * 4;
+        assert_ne!(&fb.pixels[j..j + 3], &[255, 0, 0]);
+    }
+
     #[test]
     fn script_write_appends_text() {
         let (text, _, _) = render_text("<p>base</p><script>document.write('injected');</script>");

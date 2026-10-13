@@ -56,6 +56,7 @@ impl BoxNode {
 pub fn layout(doc: &Document, rules: &[Rule]) -> Vec<BoxNode> {
     let mut y = 0;
     let mut next = 0usize;
+    let mut ancs: Vec<(&str, &[(String, String)])> = Vec::new();
     let mut out = Vec::new();
     for n in &doc.nodes {
         if let Node::Element { tag, .. } = n {
@@ -63,7 +64,7 @@ pub fn layout(doc: &Document, rules: &[Rule]) -> Vec<BoxNode> {
                 continue;
             }
         }
-        out.push(layout_node(n, 0, &mut y, rules, None, &mut next));
+        out.push(layout_node(n, 0, &mut y, rules, None, &mut next, &mut ancs));
     }
     out
 }
@@ -100,8 +101,13 @@ fn alloc_index(next: &mut usize) -> usize {
 
 type Attrs = Vec<(String, String)>;
 
-fn styled_height(tag: &str, attrs: &Attrs, rules: &[Rule]) -> Option<u32> {
-    for (k, v) in specified_styles(tag, attrs, rules) {
+fn styled_height(
+    tag: &str,
+    attrs: &Attrs,
+    ancs: &[(&str, &[(String, String)])],
+    rules: &[Rule],
+) -> Option<u32> {
+    for (k, v) in specified_styles(tag, attrs, ancs, rules) {
         if k == "height" {
             if let Some(px) = parse_px(&v) {
                 return Some(px);
@@ -111,8 +117,13 @@ fn styled_height(tag: &str, attrs: &Attrs, rules: &[Rule]) -> Option<u32> {
     None
 }
 
-fn has_width_decl(tag: &str, attrs: &Attrs, rules: &[Rule]) -> Option<u32> {
-    for (k, v) in specified_styles(tag, attrs, rules) {
+fn has_width_decl(
+    tag: &str,
+    attrs: &Attrs,
+    ancs: &[(&str, &[(String, String)])],
+    rules: &[Rule],
+) -> Option<u32> {
+    for (k, v) in specified_styles(tag, attrs, ancs, rules) {
         if k == "width" {
             if let Some(px) = parse_px(&v) {
                 return Some(px);
@@ -122,22 +133,38 @@ fn has_width_decl(tag: &str, attrs: &Attrs, rules: &[Rule]) -> Option<u32> {
     None
 }
 
-fn styled_width(tag: &str, attrs: &Attrs, x: u32, rules: &[Rule]) -> u32 {
+fn styled_width(
+    tag: &str,
+    attrs: &Attrs,
+    x: u32,
+    ancs: &[(&str, &[(String, String)])],
+    rules: &[Rule],
+) -> u32 {
     let base = 800u32.saturating_sub(x);
-    if let Some(px) = has_width_decl(tag, attrs, rules) {
+    if let Some(px) = has_width_decl(tag, attrs, ancs, rules) {
         return px.min(base);
     }
     base
 }
 
-fn is_flex_tag(tag: &str, attrs: &Attrs, rules: &[Rule]) -> bool {
-    specified_styles(tag, attrs, rules)
+fn is_flex_tag(
+    tag: &str,
+    attrs: &Attrs,
+    ancs: &[(&str, &[(String, String)])],
+    rules: &[Rule],
+) -> bool {
+    specified_styles(tag, attrs, ancs, rules)
         .iter()
         .any(|(k, v)| k == "display" && v == "flex")
 }
 
-fn flex_direction(tag: &str, attrs: &Attrs, rules: &[Rule]) -> &'static str {
-    for (k, v) in specified_styles(tag, attrs, rules) {
+fn flex_direction(
+    tag: &str,
+    attrs: &Attrs,
+    ancs: &[(&str, &[(String, String)])],
+    rules: &[Rule],
+) -> &'static str {
+    for (k, v) in specified_styles(tag, attrs, ancs, rules) {
         if k == "flex-direction" {
             if v == "column" {
                 return "column";
@@ -150,13 +177,14 @@ fn flex_direction(tag: &str, attrs: &Attrs, rules: &[Rule]) -> &'static str {
     "row"
 }
 
-fn layout_node(
-    n: &Node,
+fn layout_node<'a>(
+    n: &'a Node,
     x: u32,
     y: &mut u32,
     rules: &[Rule],
     cur: Option<usize>,
     next: &mut usize,
+    ancs: &mut Vec<(&'a str, &'a [(String, String)])>,
 ) -> BoxNode {
     match n {
         Node::Text(t) => {
@@ -186,29 +214,33 @@ fn layout_node(
                     y: *y,
                     w: 0,
                     h: 0,
-                    style: specified_styles(tag, attrs, rules),
+                    style: specified_styles(tag, attrs, ancs, rules),
                     el: None,
                     children: vec![],
                 };
             }
-            if is_flex_tag(tag, attrs, rules) && flex_direction(tag, attrs, rules) == "row" {
-                return layout_flex_row(tag, attrs, children, x, y, rules, next);
+            if is_flex_tag(tag, attrs, ancs, rules)
+                && flex_direction(tag, attrs, ancs, rules) == "row"
+            {
+                return layout_flex_row(tag, attrs, children, x, y, rules, next, ancs);
             }
             let mine = Some(alloc_index(next));
             let start = *y;
-            let style = specified_styles(tag, attrs, rules);
-            let w = styled_width(tag, attrs, x, rules);
+            let style = specified_styles(tag, attrs, ancs, rules);
+            let w = styled_width(tag, attrs, x, ancs, rules);
             let mut kids = Vec::new();
+            ancs.push((tag.as_str(), attrs.as_slice()));
             for c in children {
                 if let Node::Element { tag: ct, .. } = c {
                     if ct == "style" || ct == "title" || ct == "head" || ct == "script" {
                         continue;
                     }
                 }
-                kids.push(layout_node(c, x + 10, y, rules, mine, next));
+                kids.push(layout_node(c, x + 10, y, rules, mine, next, ancs));
             }
+            let _ = ancs.pop();
             let content_h = *y - start;
-            let wanted = styled_height(tag, attrs, rules).unwrap_or(0);
+            let wanted = styled_height(tag, attrs, ancs, rules).unwrap_or(0);
             let h = content_h.max(if kids.is_empty() {
                 wanted.max(20)
             } else {
@@ -232,19 +264,21 @@ fn layout_node(
 }
 
 /// Flex row: children share one line, x advances, y stays at row top.
-fn layout_flex_row(
-    tag: &str,
-    attrs: &Attrs,
-    children: &[Node],
+#[allow(clippy::too_many_arguments)]
+fn layout_flex_row<'a>(
+    tag: &'a str,
+    attrs: &'a Attrs,
+    children: &'a [Node],
     x: u32,
     y: &mut u32,
     rules: &[Rule],
     next: &mut usize,
+    ancs: &mut Vec<(&'a str, &'a [(String, String)])>,
 ) -> BoxNode {
     let mine = Some(alloc_index(next));
     let start_y = *y;
-    let style = specified_styles(tag, attrs, rules);
-    let w = styled_width(tag, attrs, x, rules);
+    let style = specified_styles(tag, attrs, ancs, rules);
+    let w = styled_width(tag, attrs, x, ancs, rules);
     let visual: Vec<&Node> = children
         .iter()
         .filter(|c| match c {
@@ -259,17 +293,17 @@ fn layout_flex_row(
     let mut kids = Vec::new();
     let mut cx = x;
     let mut max_h = 0;
+    ancs.push((tag, attrs.as_slice()));
     for c in visual {
         let item_w = match c {
             Node::Text(_) => share,
             Node::Element {
                 tag: ct, attrs: ca, ..
-            } => has_width_decl(ct, ca, rules)
+            } => has_width_decl(ct, ca, ancs, rules)
                 .unwrap_or(share)
                 .min(w.saturating_sub(cx - x)),
         };
-        let mut row_y = start_y;
-        let mut item = layout_flex_item(c, cx, &mut row_y, item_w, rules, mine, next);
+        let mut item = layout_flex_item(c, cx, item_w, rules, mine, next, ancs);
         item.x = cx;
         item.y = start_y;
         if item.w == 0 || item.w > item_w {
@@ -279,7 +313,8 @@ fn layout_flex_row(
         kids.push(item);
         cx += item_w;
     }
-    let wanted = styled_height(tag, attrs, rules).unwrap_or(0);
+    let _ = ancs.pop();
+    let wanted = styled_height(tag, attrs, ancs, rules).unwrap_or(0);
     let h = max_h.max(wanted).max(if kids.is_empty() { 20 } else { 0 });
     *y = start_y + h;
     BoxNode {
@@ -294,14 +329,14 @@ fn layout_flex_row(
     }
 }
 
-fn layout_flex_item(
-    n: &Node,
+fn layout_flex_item<'a>(
+    n: &'a Node,
     x: u32,
-    _row_y: &mut u32,
     cap_w: u32,
     rules: &[Rule],
     cur: Option<usize>,
     next: &mut usize,
+    ancs: &mut Vec<(&'a str, &'a [(String, String)])>,
 ) -> BoxNode {
     match n {
         Node::Text(_) => BoxNode {
@@ -320,25 +355,27 @@ fn layout_flex_item(
             children,
         } => {
             let mine = Some(alloc_index(next));
-            let style = specified_styles(tag, attrs, rules);
+            let style = specified_styles(tag, attrs, ancs, rules);
             let mut inner_y = 0;
             let mut kids = Vec::new();
+            ancs.push((tag.as_str(), attrs.as_slice()));
             for c in children {
                 if let Node::Element { tag: ct, .. } = c {
                     if ct == "style" || ct == "title" || ct == "head" || ct == "script" {
                         continue;
                     }
                 }
-                kids.push(layout_node(c, 0, &mut inner_y, rules, mine, next));
+                kids.push(layout_node(c, 0, &mut inner_y, rules, mine, next, ancs));
             }
+            let _ = ancs.pop();
             let content_h = inner_y;
-            let wanted = styled_height(tag, attrs, rules).unwrap_or(0);
+            let wanted = styled_height(tag, attrs, ancs, rules).unwrap_or(0);
             let h = content_h.max(if kids.is_empty() {
                 wanted.max(20)
             } else {
                 wanted
             });
-            let w = has_width_decl(tag, attrs, rules)
+            let w = has_width_decl(tag, attrs, ancs, rules)
                 .unwrap_or(cap_w)
                 .min(cap_w);
             BoxNode {
@@ -521,10 +558,15 @@ mod tests {
     }
 
     fn find_kind<'a>(boxes: &'a [BoxNode], kind: &str) -> Option<&'a BoxNode> {
-        boxes
-            .iter()
-            .find(|b| b.kind == kind)
-            .or_else(|| boxes.iter().find_map(|b| find_kind(&b.children, kind)))
+        for b in boxes {
+            if b.kind == kind {
+                return Some(b);
+            }
+            if let Some(hit) = find_kind(&b.children, kind) {
+                return Some(hit);
+            }
+        }
+        None
     }
 
     #[test]

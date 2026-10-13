@@ -1,6 +1,8 @@
-//! Aerova CSS: rule parser + cascade with class/id selectors.
-//! Supports `*`, `tag`, `.class`, `#id`, `tag.class`, `tag#id`, comma groups.
-//! Specificity: id=100, class=10, tag=1. Higher wins; ties break by order.
+//! Aerova CSS: rule parser + cascade with compound selectors.
+//! Supports `*`, `tag`, `.class`, `#id`, `[attr]`/`[attr="v"]`, compounds
+//! (`tag.cls#id[attr]`), comma groups, descendant (`div p`), inline `style`.
+//! Specificity: id=100, class-or-attr=10, tag=1, inline=1000, descendants sum.
+//! Higher wins; ties break by order. No `>`, `+`, `~`, pseudo-classes.
 
 /// A CSS declaration: `color: red`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,75 +71,199 @@ fn class_list(attrs: &[(String, String)]) -> Vec<String> {
     })
 }
 
-/// Match selector against `(tag, attrs)`. Returns specificity on match.
-fn matches(selector: &str, tag: &str, attrs: &[(String, String)]) -> Option<u32> {
-    if selector == "*" {
-        return Some(0);
+/// One compound selector: `div#id.cls[a="v"]`.
+struct Compound {
+    tag: Option<String>,
+    id: Option<String>,
+    classes: Vec<String>,
+    attrs: Vec<(String, Option<String>)>,
+}
+
+fn take_name(s: &str, i: usize) -> (String, usize) {
+    let b = s.as_bytes();
+    let mut j = i;
+    while j < b.len() && b[j] != b'#' && b[j] != b'.' && b[j] != b'[' {
+        j += 1;
     }
-    // id-only: #main
-    if let Some(id) = selector.strip_prefix('#') {
-        let mine = attr_value(attrs, "id")?.to_lowercase();
-        return if mine == id { Some(100) } else { None };
+    (s[i..j].to_string(), j)
+}
+
+fn parse_compound(s: &str) -> Option<Compound> {
+    if s.is_empty() {
+        return None;
     }
-    // class-only: .row (single class for v1; .a.b checks all parts)
-    if let Some(stripped) = selector.strip_prefix('.') {
-        let want: Vec<&str> = stripped.split('.').collect();
-        if want.is_empty() || want.iter().any(|w| w.is_empty()) {
+    if s == "*" {
+        return Some(Compound {
+            tag: None,
+            id: None,
+            classes: Vec::new(),
+            attrs: Vec::new(),
+        });
+    }
+    let mut c = Compound {
+        tag: None,
+        id: None,
+        classes: Vec::new(),
+        attrs: Vec::new(),
+    };
+    let b = s.as_bytes();
+    let mut j = 0;
+    while j < b.len() && b[j] != b'#' && b[j] != b'.' && b[j] != b'[' {
+        j += 1;
+    }
+    let head = &s[..j];
+    if head == "*" {
+        if j < b.len() {
             return None;
         }
-        let have = class_list(attrs);
-        return if want.iter().all(|w| have.iter().any(|h| h == w)) {
-            Some(10 * want.len() as u32)
-        } else {
-            None
-        };
+    } else if !head.is_empty() {
+        c.tag = Some(head.to_string());
     }
-    // tag#id
-    if let Some((t, id)) = selector.split_once('#') {
+    let mut i = j;
+    while i < b.len() {
+        match b[i] {
+            b'#' => {
+                let (v, ni) = take_name(s, i + 1);
+                if v.is_empty() || c.id.is_some() {
+                    return None;
+                }
+                c.id = Some(v);
+                i = ni;
+            }
+            b'.' => {
+                let (v, ni) = take_name(s, i + 1);
+                if v.is_empty() {
+                    return None;
+                }
+                c.classes.push(v);
+                i = ni;
+            }
+            b'[' => {
+                let rel = s[i..].find(']')?;
+                let close = i + rel;
+                let inner = s[i + 1..close].trim();
+                let (name, val) = match inner.split_once('=') {
+                    None => (inner.trim().to_string(), None),
+                    Some((k, v)) => {
+                        let v = v.trim();
+                        let v = v
+                            .strip_prefix('"')
+                            .and_then(|x| x.strip_suffix('"'))
+                            .or_else(|| v.strip_prefix('\'').and_then(|x| x.strip_suffix('\'')))
+                            .unwrap_or(v);
+                        (k.trim().to_string(), Some(v.to_string()))
+                    }
+                };
+                if name.is_empty() {
+                    return None;
+                }
+                c.attrs.push((name, val));
+                i = close + 1;
+            }
+            _ => return None,
+        }
+    }
+    if c.tag.is_none() && c.id.is_none() && c.classes.is_empty() && c.attrs.is_empty() {
+        return None;
+    }
+    Some(c)
+}
+
+fn match_compound(c: &Compound, tag: &str, attrs: &[(String, String)]) -> Option<u32> {
+    if let Some(t) = &c.tag {
         if t != tag {
             return None;
         }
+    }
+    if let Some(id) = &c.id {
         let mine = attr_value(attrs, "id")?.to_lowercase();
-        return if mine == id { Some(101) } else { None };
+        if mine != *id {
+            return None;
+        }
     }
-    // tag.class(.class2...)
-    if selector.contains('.') {
-        let mut parts = selector.split('.');
-        let t = parts.next().unwrap_or("");
-        if t != tag {
-            return None;
-        }
-        let want: Vec<&str> = parts.collect();
-        if want.is_empty() || want.iter().any(|w| w.is_empty()) {
-            return None;
-        }
+    if !c.classes.is_empty() {
         let have = class_list(attrs);
-        return if want.iter().all(|w| have.iter().any(|h| h == w)) {
-            Some(1 + 10 * want.len() as u32)
-        } else {
-            None
-        };
+        if !c.classes.iter().all(|w| have.iter().any(|h| h == w)) {
+            return None;
+        }
     }
-    // plain tag
-    if selector == tag {
-        return Some(1);
+    for (name, want) in &c.attrs {
+        let have = attr_value(attrs, name)?;
+        if let Some(v) = want {
+            if have.to_lowercase() != *v {
+                return None;
+            }
+        }
     }
-    None
+    let mut spec = 0u32;
+    if c.tag.is_some() {
+        spec += 1;
+    }
+    if c.id.is_some() {
+        spec += 100;
+    }
+    spec += 10 * (c.classes.len() + c.attrs.len()) as u32;
+    Some(spec)
+}
+
+/// Match selector against `(tag, attrs)` with ancestor chain for descendants.
+/// Returns specificity on match; ancestor parts sum into it.
+fn matches(
+    selector: &str,
+    tag: &str,
+    attrs: &[(String, String)],
+    ancestors: &[(&str, &[(String, String)])],
+) -> Option<u32> {
+    let parts: Vec<&str> = selector.split_whitespace().collect();
+    if parts.is_empty() {
+        return None;
+    }
+    let mut spec = match_compound(&parse_compound(parts[parts.len() - 1])?, tag, attrs)?;
+    let mut ai = ancestors.len();
+    for part in parts[..parts.len() - 1].iter().rev() {
+        let c = parse_compound(part)?;
+        let mut found = None;
+        while ai > 0 {
+            ai -= 1;
+            let (atag, aattrs) = ancestors[ai];
+            if let Some(s) = match_compound(&c, atag, aattrs) {
+                found = Some(s);
+                break;
+            }
+        }
+        spec += found?;
+    }
+    Some(spec)
 }
 
 /// Compute specified style for `(tag, attrs)`: specificity then order, later wins ties.
+/// `ancestors` is the parent chain (root first) for descendant selectors.
+/// An inline `style` attribute beats every rule.
 #[must_use]
 pub fn specified_styles(
     tag: &str,
     attrs: &[(String, String)],
+    ancestors: &[(&str, &[(String, String)])],
     rules: &[Rule],
 ) -> Vec<(String, String)> {
     let tag = tag.to_lowercase();
     let mut hits: Vec<(u32, usize, String, String)> = Vec::new();
     for (idx, r) in rules.iter().enumerate() {
-        if let Some(spec) = matches(&r.selector, &tag, attrs) {
+        if let Some(spec) = matches(&r.selector, &tag, attrs, ancestors) {
             for d in &r.declarations {
                 hits.push((spec, idx, d.property.clone(), d.value.clone()));
+            }
+        }
+    }
+    if let Some(inline) = attr_value(attrs, "style") {
+        for decl in inline.split(';') {
+            let Some((k, v)) = decl.split_once(':') else {
+                continue;
+            };
+            let property = k.trim().to_lowercase();
+            let value = v.trim().to_string();
+            if !property.is_empty() && !value.is_empty() {
+                hits.push((1000, usize::MAX, property, value));
             }
         }
     }
@@ -186,10 +312,10 @@ mod tests {
     #[test]
     fn cascade_later_wins_and_star_applies() {
         let rules = parse("* { color: black; } p { color: red; } p { color: blue; }");
-        let s = specified_styles("p", &[], &rules);
+        let s = specified_styles("p", &[], &[], &rules);
         let color = s.iter().find(|(k, _)| k == "color").unwrap();
         assert_eq!(color.1, "blue");
-        let div = specified_styles("div", &[], &rules);
+        let div = specified_styles("div", &[], &[], &rules);
         assert_eq!(div.iter().find(|(k, _)| k == "color").unwrap().1, "black");
     }
 
@@ -197,12 +323,12 @@ mod tests {
     fn matches_classes_and_ids() {
         let rules = parse(".row { display: flex; } #main { color: red; } div.box { height: 9px; }");
         let cls = vec![("class".to_string(), "row".to_string())];
-        assert!(specified_styles("div", &cls, &rules)
+        assert!(specified_styles("div", &cls, &[], &rules)
             .iter()
             .any(|(k, v)| k == "display" && v == "flex"));
         let id = vec![("id".to_string(), "main".to_string())];
         assert_eq!(
-            specified_styles("p", &id, &rules)
+            specified_styles("p", &id, &[], &rules)
                 .iter()
                 .find(|(k, _)| k == "color")
                 .unwrap()
@@ -210,10 +336,10 @@ mod tests {
             "red"
         );
         let both = vec![("class".to_string(), "box".to_string())];
-        assert!(specified_styles("div", &both, &rules)
+        assert!(specified_styles("div", &both, &[], &rules)
             .iter()
             .any(|(k, _)| k == "height"));
-        assert!(specified_styles("span", &both, &rules)
+        assert!(specified_styles("span", &both, &[], &rules)
             .iter()
             .all(|(k, _)| k != "height"));
     }
@@ -225,8 +351,88 @@ mod tests {
             ("class".to_string(), "x".to_string()),
             ("id".to_string(), "y".to_string()),
         ];
-        let s = specified_styles("div", &attrs, &rules);
+        let s = specified_styles("div", &attrs, &[], &rules);
         assert_eq!(s.iter().find(|(k, _)| k == "color").unwrap().1, "red");
+    }
+
+    fn attr(n: &str, v: &str) -> (String, String) {
+        (n.to_string(), v.to_string())
+    }
+
+    #[test]
+    fn matches_attr_selectors() {
+        let rules = parse("[href] { color: blue; } a[href=\"x\"] { color: red; }");
+        let link = vec![attr("href", "x")];
+        let s = specified_styles("a", &link, &[], &rules);
+        assert_eq!(s.iter().find(|(k, _)| k == "color").unwrap().1, "red");
+        let other = vec![attr("href", "y")];
+        let s = specified_styles("a", &other, &[], &rules);
+        assert_eq!(s.iter().find(|(k, _)| k == "color").unwrap().1, "blue");
+        let bare: Vec<(String, String)> = vec![];
+        assert!(specified_styles("a", &bare, &[], &rules)
+            .iter()
+            .all(|(k, _)| k != "color"));
+        let wrong_tag = vec![attr("href", "x")];
+        assert_eq!(
+            specified_styles("p", &wrong_tag, &[], &rules)
+                .iter()
+                .find(|(k, _)| k == "color")
+                .unwrap()
+                .1,
+            "blue"
+        );
+    }
+
+    #[test]
+    fn matches_compound_class_and_attr() {
+        let rules = parse(".btn[disabled] { color: gray; }");
+        let both = vec![attr("class", "btn"), attr("disabled", "")];
+        assert!(specified_styles("button", &both, &[], &rules)
+            .iter()
+            .any(|(k, _)| k == "color"));
+        let no_attr = vec![attr("class", "btn")];
+        assert!(specified_styles("button", &no_attr, &[], &rules)
+            .iter()
+            .all(|(k, _)| k != "color"));
+    }
+
+    #[test]
+    fn matches_descendants_not_siblings() {
+        let rules = parse("div p { color: red; }");
+        let div: Vec<(String, String)> = vec![];
+        let ancs = [("div", &div[..])];
+        let s = specified_styles("p", &[], &ancs, &rules);
+        assert_eq!(s.iter().find(|(k, _)| k == "color").unwrap().1, "red");
+        let s = specified_styles("p", &[], &[], &rules);
+        assert!(s.iter().all(|(k, _)| k != "color"));
+        let span_ancs: Vec<(String, String)> = vec![];
+        let ancs = [("span", &span_ancs[..])];
+        let s = specified_styles("p", &[], &ancs, &rules);
+        assert!(s.iter().all(|(k, _)| k != "color"));
+    }
+
+    #[test]
+    fn descendant_specificity_sums() {
+        let rules = parse("p { color: black; } div p { color: red; } .x p { color: green; }");
+        let div: Vec<(String, String)> = vec![];
+        let ancs = [("div", &div[..])];
+        let s = specified_styles("p", &[], &ancs, &rules);
+        assert_eq!(s.iter().find(|(k, _)| k == "color").unwrap().1, "red");
+        let cls = [attr("class", "x")];
+        let ancs = [("div", &cls[..])];
+        let s = specified_styles("p", &[], &ancs, &rules);
+        assert_eq!(s.iter().find(|(k, _)| k == "color").unwrap().1, "green");
+    }
+
+    #[test]
+    fn inline_style_beats_id_rule() {
+        let rules = parse("#y { color: red; }");
+        let attrs = vec![attr("id", "y"), attr("style", "color: blue; height: 9px")];
+        let s = specified_styles("div", &attrs, &[], &rules);
+        assert_eq!(s.iter().find(|(k, _)| k == "color").unwrap().1, "blue");
+        assert!(specified_styles("div", &attrs, &[], &rules)
+            .iter()
+            .any(|(k, v)| k == "height" && v == "9px"));
     }
 
     #[test]
