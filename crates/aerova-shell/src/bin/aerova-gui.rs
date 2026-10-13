@@ -1,7 +1,7 @@
 //! Aerova GUI v1 (`gui` feature): minifb window on the engine framebuffer.
 //! URL bar + status line in a 5x7 bitmap font; clicks dispatch into the live page.
 
-use aerova_engine::Page;
+use aerova_engine::{Page, TabManager};
 use minifb::{Key, KeyRepeat, MouseButton, MouseMode, Window, WindowOptions};
 
 const PAGE_W: usize = 800;
@@ -225,6 +225,39 @@ fn normalize_url(s: &str) -> String {
     }
 }
 
+/// Keyboard navigation gesture, resolved from pressed keys + alt modifier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Nav {
+    Back,
+    Forward,
+    Reload,
+}
+
+fn nav_action(pressed: &[Key], alt: bool) -> Option<Nav> {
+    if alt && pressed.contains(&Key::Left) {
+        return Some(Nav::Back);
+    }
+    if alt && pressed.contains(&Key::Right) {
+        return Some(Nav::Forward);
+    }
+    if pressed.contains(&Key::F5) {
+        return Some(Nav::Reload);
+    }
+    None
+}
+
+fn load_url(page: &mut Page, editor: &mut Editor, status: &mut String, url: &str) {
+    match Page::open_url(url) {
+        Ok(p) => {
+            *page = p;
+            println!("{}", page.text);
+            editor.buf = url.to_string();
+            *status = format!("loaded {url}");
+        }
+        Err(e) => *status = format!("load failed: {e}"),
+    }
+}
+
 fn fb_to_u32(fb: &aerova_paint::Framebuffer) -> Vec<u32> {
     fb.pixels
         .chunks_exact(4)
@@ -293,31 +326,43 @@ fn main() {
             std::process::exit(1);
         });
     window.set_target_fps(30);
+    let mut tabs = TabManager::new();
+    let tab = tabs.new_tab(&start);
     let mut page = Page::open_url(&start).unwrap_or_else(|e| {
         eprintln!("gui: initial load failed: {e}");
         Page::open("").expect("blank page")
     });
     println!("{}", page.text);
     let mut editor = Editor::new(start);
-    let mut status = String::from("esc quits | enter loads | click dispatches");
+    let mut status = String::from("esc quits | enter loads | alt+left/right history | f5 reloads");
     let mut buf = vec![0u32; WIN_W * WIN_H];
     let mut was_down = false;
     while window.is_open() && !window.is_key_down(Key::Escape) {
+        let alt = window.is_key_down(Key::LeftAlt) || window.is_key_down(Key::RightAlt);
+        let pressed = window.get_keys_pressed(KeyRepeat::Yes);
+        match nav_action(&pressed, alt) {
+            Some(Nav::Back) => match tabs.back(tab) {
+                Some(url) => load_url(&mut page, &mut editor, &mut status, &url),
+                None => status = String::from("no back history"),
+            },
+            Some(Nav::Forward) => match tabs.forward(tab) {
+                Some(url) => load_url(&mut page, &mut editor, &mut status, &url),
+                None => status = String::from("no forward history"),
+            },
+            Some(Nav::Reload) => match tabs.current(tab) {
+                Some(url) => load_url(&mut page, &mut editor, &mut status, &url),
+                None => status = String::from("no page"),
+            },
+            None => {}
+        }
         let shift = window.is_key_down(Key::LeftShift) || window.is_key_down(Key::RightShift);
-        for k in window.get_keys_pressed(KeyRepeat::Yes) {
+        for k in pressed {
             match k {
                 Key::Backspace => editor.backspace(),
                 Key::Enter | Key::NumPadEnter => {
                     let url = normalize_url(&editor.buf);
-                    editor.buf = url.clone();
-                    match Page::open_url(&url) {
-                        Ok(p) => {
-                            page = p;
-                            println!("{}", page.text);
-                            status = format!("loaded {url}");
-                        }
-                        Err(e) => status = format!("load failed: {e}"),
-                    }
+                    tabs.navigate(tab, &url);
+                    load_url(&mut page, &mut editor, &mut status, &url);
                 }
                 _ => {
                     if let Some(c) = key_to_char(k, shift) {
@@ -373,6 +418,15 @@ mod tests {
         assert_eq!(key_to_char(Key::Space, false), Some(' '));
         assert_eq!(key_to_char(Key::F5, false), None);
         assert_eq!(key_to_char(Key::Enter, false), None);
+    }
+
+    #[test]
+    fn nav_gestures_resolve() {
+        assert_eq!(nav_action(&[Key::Left], true), Some(Nav::Back));
+        assert_eq!(nav_action(&[Key::Right], true), Some(Nav::Forward));
+        assert_eq!(nav_action(&[Key::F5], false), Some(Nav::Reload));
+        assert_eq!(nav_action(&[Key::Left], false), None);
+        assert_eq!(nav_action(&[], true), None);
     }
 
     #[test]
