@@ -284,10 +284,21 @@ fn blank() -> Page {
 
 impl Tabs {
     fn open(start: &str) -> Self {
+        let page = Page::open_url(start).unwrap_or_else(|_| blank());
+        Self::from_html(start, page)
+    }
+
+    /// Open a tab straight from HTML: test seam for draw/scroll geometry.
+    #[cfg(test)]
+    fn open_html(html: &str) -> Self {
+        Self::from_html("about:blank", Page::open(html).unwrap_or_else(|_| blank()))
+    }
+
+    fn from_html(url: &str, page: Page) -> Self {
         let mut mgr = TabManager::new();
-        let current = mgr.new_tab(start);
+        let current = mgr.new_tab(url);
         let mut pages = HashMap::new();
-        pages.insert(current, Page::open_url(start).unwrap_or_else(|_| blank()));
+        pages.insert(current, page);
         Self {
             mgr,
             pages,
@@ -651,6 +662,64 @@ mod tests {
         assert_eq!(key_to_char(Key::Space, false), Some(' '));
         assert_eq!(key_to_char(Key::F5, false), None);
         assert_eq!(key_to_char(Key::Enter, false), None);
+    }
+
+    fn long_html() -> String {
+        let mut h = String::new();
+        for i in 0..30 {
+            h.push_str(&format!("<p style=\"height:60px\">line {i}</p>"));
+        }
+        h
+    }
+
+    #[test]
+    fn scrollbar_geometry_tracks_offset() {
+        let short = Tabs::open_html("<p>hi</p>");
+        assert_eq!(short.page().content_h(), PAGE_H as u32);
+        assert!(scrollbar(&short).is_none());
+
+        let mut long = Tabs::open_html(&long_html());
+        assert_eq!(long.page().content_h(), 1800);
+        let (x, y, h) = scrollbar(&long).unwrap();
+        assert_eq!(x, WIN_W - 4);
+        assert_eq!(y, PAGE_Y);
+        assert!(h < PAGE_H);
+        long.page_mut().scroll_to(600);
+        let (_, y2, _) = scrollbar(&long).unwrap();
+        assert!(y2 > y);
+    }
+
+    #[test]
+    fn draw_paints_thumb_only_for_tall_pages() {
+        let x = WIN_W - 2;
+        let y = PAGE_Y + 2;
+        let mut tall = vec![0u32; WIN_W * WIN_H];
+        let tabs = Tabs::open_html(&long_html());
+        draw(&mut tall, &tabs, "u", "s");
+        assert_eq!(tall[y * WIN_W + x], GRAY);
+        let mut short = vec![0u32; WIN_W * WIN_H];
+        let tabs = Tabs::open_html("<p>hi</p>");
+        draw(&mut short, &tabs, "u", "s");
+        assert_ne!(short[y * WIN_W + x], GRAY);
+    }
+
+    #[test]
+    fn scroll_keys_move_and_clamp() {
+        let mut t = Tabs::open_html(&long_html());
+        scroll_keys(&mut t, &[]);
+        assert_eq!(t.page().scroll_y(), 0);
+        scroll_keys(&mut t, &[Key::Down]);
+        assert_eq!(t.page().scroll_y(), 40);
+        scroll_keys(&mut t, &[Key::Up, Key::Up]);
+        assert_eq!(t.page().scroll_y(), 0);
+        scroll_keys(&mut t, &[Key::PageDown]);
+        assert_eq!(t.page().scroll_y(), PAGE_H as u32);
+        scroll_keys(&mut t, &[Key::PageUp, Key::PageUp]);
+        assert_eq!(t.page().scroll_y(), 0);
+        scroll_keys(&mut t, &[Key::End]);
+        assert_eq!(t.page().scroll_y(), 1200);
+        scroll_keys(&mut t, &[Key::Home]);
+        assert_eq!(t.page().scroll_y(), 0);
     }
 
     #[test]
