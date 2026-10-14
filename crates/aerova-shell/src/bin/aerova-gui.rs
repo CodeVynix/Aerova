@@ -723,6 +723,22 @@ mod tests {
     }
 
     #[test]
+    fn draw_moves_content_with_scroll() {
+        let mut tabs = Tabs::open_html(&long_html());
+        let mut before = vec![0u32; WIN_W * WIN_H];
+        draw(&mut before, &tabs, "u", "s");
+        tabs.page_mut().scroll_by(600);
+        let mut after = vec![0u32; WIN_W * WIN_H];
+        draw(&mut after, &tabs, "u", "s");
+        let diff = before
+            .iter()
+            .zip(after.iter())
+            .filter(|(a, b)| a != b)
+            .count();
+        assert!(diff > 1000, "content did not move: {diff}");
+    }
+
+    #[test]
     fn nav_gestures_resolve() {
         assert_eq!(nav_action(&[Key::Left], true, false), Some(Nav::Back));
         assert_eq!(nav_action(&[Key::Right], true, false), Some(Nav::Forward));
