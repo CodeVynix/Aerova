@@ -18,6 +18,10 @@ const BLACK: u32 = 0x000000;
 const DARK: u32 = 0x333333;
 const WHITE: u32 = 0xFFFFFF;
 const GRAY: u32 = 0xE8E8E8;
+const THUMB: u32 = 0x8A8A8A;
+const THUMB_W: usize = 6;
+/// Grab zone is wider than the visible thumb so it is easy to hit.
+const THUMB_GRAB_W: usize = 12;
 
 /// 5x7 glyph rows; bit 4 (0x10) is the leftmost column. Lowercase echoes uppercase.
 fn glyph(c: u8) -> Option<[u8; 7]> {
@@ -414,7 +418,14 @@ fn scrollbar(tabs: &Tabs) -> Option<(usize, usize, usize)> {
     let max_off = page.content_h() - page.view_h();
     let travel = PAGE_H - thumb_h;
     let top = (page.scroll_y() as usize * travel) / max_off as usize;
-    Some((WIN_W - 4, PAGE_Y + top, thumb_h))
+    Some((WIN_W - THUMB_W, PAGE_Y + top, thumb_h))
+}
+
+/// Content offset for dragging the scrollbar to window y `my`.
+fn drag_scroll_offset(my: usize, content_h: u32) -> u32 {
+    let y = my.saturating_sub(PAGE_Y) as u32;
+    let off = y.saturating_mul(content_h) / PAGE_H as u32;
+    off.min(content_h.saturating_sub(PAGE_H as u32))
 }
 
 /// Strip cell index at x. Every in-window x maps to a tab; empty set has none.
@@ -495,7 +506,7 @@ fn draw(buf: &mut [u32], tabs: &Tabs, url: &str, status: &str) {
         }
     }
     if let Some((sx, sy, sh)) = scrollbar(tabs) {
-        fill_rect(buf, sx, sy, 4, sh, GRAY);
+        fill_rect(buf, sx, sy, THUMB_W, sh, THUMB);
     }
     draw_text(buf, 4, TAB_BAR + 4, url, BLACK);
     fill_rect(buf, 4 + url.len() * 6, TAB_BAR + 12, 5, 1, BLACK);
@@ -507,13 +518,26 @@ fn sync_bar(tabs: &Tabs, editor: &mut Editor, status: &mut String) {
     *status = tabs.status_line();
 }
 
-/// Scroll keys: arrows nudge, Page keys jump a viewport, Home/End jump ends.
-fn scroll_keys(tabs: &mut Tabs, pressed: &[Key]) {
+/// Scroll keys: arrows nudge (a viewport with Ctrl), Page keys jump a
+/// viewport, Home/End jump ends.
+fn scroll_keys(tabs: &mut Tabs, pressed: &[Key], ctrl: bool) {
     let view = tabs.page().view_h() as i32;
     for k in pressed {
         let dy = match k {
-            Key::Down => 40,
-            Key::Up => -40,
+            Key::Down => {
+                if ctrl {
+                    view
+                } else {
+                    40
+                }
+            }
+            Key::Up => {
+                if ctrl {
+                    -view
+                } else {
+                    -40
+                }
+            }
             Key::PageDown => view,
             Key::PageUp => -view,
             _ => continue,
@@ -537,15 +561,16 @@ fn main() {
             eprintln!("gui: cannot open window: {e}");
             std::process::exit(1);
         });
-    window.set_target_fps(30);
+    window.set_target_fps(60);
     let mut tabs = Tabs::open(&start);
     println!("{}", tabs.page().text);
     let mut editor = Editor::new(start);
     let mut status = String::from(
-        "esc quits | enter loads | alt+arrows history | f5 reload | ctrl+t/w/tab tabs",
+        "esc quits | enter loads | alt+arrows history | f5 reload | ctrl+t/w/tab | ctrl+arrows jump | drag bar",
     );
     let mut buf = vec![0u32; WIN_W * WIN_H];
     let mut was_down = false;
+    let mut dragging = false;
     while window.is_open() && !window.is_key_down(Key::Escape) {
         let alt = window.is_key_down(Key::LeftAlt) || window.is_key_down(Key::RightAlt);
         let ctrl = window.is_key_down(Key::LeftCtrl) || window.is_key_down(Key::RightCtrl);
@@ -582,7 +607,7 @@ fn main() {
             None => {}
         }
         let shift = window.is_key_down(Key::LeftShift) || window.is_key_down(Key::RightShift);
-        scroll_keys(&mut tabs, &pressed);
+        scroll_keys(&mut tabs, &pressed, ctrl);
         if let Some((_, wy)) = window.get_scroll_wheel() {
             if wy.abs() > 0.5 {
                 let steps = (wy * 3.0) as i32;
@@ -616,6 +641,8 @@ fn main() {
                         tabs.switch(i);
                         sync_bar(&tabs, &mut editor, &mut status);
                     }
+                } else if scrollbar(&tabs).is_some() && mx + THUMB_GRAB_W >= WIN_W {
+                    dragging = true;
                 } else {
                     let (px, py) = (mx as i32, my as i32 - PAGE_Y as i32);
                     if px >= 0 && py >= 0 {
@@ -625,6 +652,16 @@ fn main() {
                         }
                     }
                 }
+            }
+        }
+        if dragging {
+            if down {
+                if let Some((_, my)) = window.get_mouse_pos(MouseMode::Discard) {
+                    let off = drag_scroll_offset(my as usize, tabs.page().content_h());
+                    tabs.page_mut().scroll_to(off);
+                }
+            } else {
+                dragging = false;
             }
         }
         was_down = down;
@@ -681,7 +718,7 @@ mod tests {
         let mut long = Tabs::open_html(&long_html());
         assert_eq!(long.page().content_h(), 1800);
         let (x, y, h) = scrollbar(&long).unwrap();
-        assert_eq!(x, WIN_W - 4);
+        assert_eq!(x, WIN_W - THUMB_W);
         assert_eq!(y, PAGE_Y);
         assert!(h < PAGE_H);
         long.page_mut().scroll_to(600);
@@ -696,30 +733,43 @@ mod tests {
         let mut tall = vec![0u32; WIN_W * WIN_H];
         let tabs = Tabs::open_html(&long_html());
         draw(&mut tall, &tabs, "u", "s");
-        assert_eq!(tall[y * WIN_W + x], GRAY);
+        assert_eq!(tall[y * WIN_W + x], THUMB);
         let mut short = vec![0u32; WIN_W * WIN_H];
         let tabs = Tabs::open_html("<p>hi</p>");
         draw(&mut short, &tabs, "u", "s");
-        assert_ne!(short[y * WIN_W + x], GRAY);
+        assert_ne!(short[y * WIN_W + x], THUMB);
     }
 
     #[test]
     fn scroll_keys_move_and_clamp() {
         let mut t = Tabs::open_html(&long_html());
-        scroll_keys(&mut t, &[]);
+        scroll_keys(&mut t, &[], false);
         assert_eq!(t.page().scroll_y(), 0);
-        scroll_keys(&mut t, &[Key::Down]);
+        scroll_keys(&mut t, &[Key::Down], false);
         assert_eq!(t.page().scroll_y(), 40);
-        scroll_keys(&mut t, &[Key::Up, Key::Up]);
+        scroll_keys(&mut t, &[Key::Up, Key::Up], false);
         assert_eq!(t.page().scroll_y(), 0);
-        scroll_keys(&mut t, &[Key::PageDown]);
+        scroll_keys(&mut t, &[Key::PageDown], false);
         assert_eq!(t.page().scroll_y(), PAGE_H as u32);
-        scroll_keys(&mut t, &[Key::PageUp, Key::PageUp]);
+        scroll_keys(&mut t, &[Key::PageUp, Key::PageUp], false);
         assert_eq!(t.page().scroll_y(), 0);
-        scroll_keys(&mut t, &[Key::End]);
+        scroll_keys(&mut t, &[Key::Down], true);
+        assert_eq!(t.page().scroll_y(), PAGE_H as u32);
+        scroll_keys(&mut t, &[Key::Up], true);
+        assert_eq!(t.page().scroll_y(), 0);
+        scroll_keys(&mut t, &[Key::End], false);
         assert_eq!(t.page().scroll_y(), 1200);
-        scroll_keys(&mut t, &[Key::Home]);
+        scroll_keys(&mut t, &[Key::Home], false);
         assert_eq!(t.page().scroll_y(), 0);
+    }
+
+    #[test]
+    fn drag_offset_maps_window_y_to_content() {
+        assert_eq!(drag_scroll_offset(PAGE_Y, 1800), 0);
+        assert_eq!(drag_scroll_offset(PAGE_Y + PAGE_H, 1800), 1200);
+        assert_eq!(drag_scroll_offset(PAGE_Y + 300, 1800), 900);
+        assert_eq!(drag_scroll_offset(0, 1800), 0);
+        assert_eq!(drag_scroll_offset(PAGE_Y, 600), 0);
     }
 
     #[test]
