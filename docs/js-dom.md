@@ -26,7 +26,7 @@ Requires `--features boa`.
 - `setTimeout(fn|string, ms)` returns an id; `clearTimeout(id)` cancels.
 - Dispatch is delay-ordered. Aerova has no event loop, so `__now` is a **logical** clock that advances to each timer's due time: delays model ordering, not wall clock. A callback scheduling a timer with `setTimeout(f, 0)` lands behind everything already due.
 - Drain is capped at 10000 callbacks per script run to stay finite.
-- `setInterval` is not implemented yet.
+- `setInterval(fn, ms)` / `clearInterval(id)` repeat until cleared; an uncleared interval burns the same 10000-callback cap, so pages stay finite.
 
 ## Lifecycle
 - One `DOMContentLoaded` is dispatched on `document` after the main script, before timers.

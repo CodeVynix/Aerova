@@ -208,6 +208,7 @@ var __wrappers = [];
 var __timerId = 1;
 var __now = 0;
 var __queue = [];
+var __cleared = {};
 
 function __match(e, sel) {
   if (sel === "*") return true;
@@ -358,12 +359,24 @@ function clearTimeout(id) {
   for (var i = 0; i < __queue.length; i++) {
     if (__queue[i].id === id) { __queue.splice(i, 1); return; }
   }
+  __cleared[id] = true;
+}
+
+function setInterval(fn, ms) {
+  var id = __timerId++;
+  __queue.push({ id: id, fn: fn, due: __now + (ms || 0), every: (ms || 0) });
+  return id;
+}
+
+function clearInterval(id) {
+  clearTimeout(id);
 }
 "##;
 
     /// Drains the timer queue after the main script, plus one DOMContentLoaded.
     /// `__now` advances to each due time so delays model ordering only, and a
-    /// callback cap keeps the drain finite without an event loop.
+    /// callback cap keeps the drain finite without an event loop. Intervals
+    /// re-queue until cleared; the same cap bounds uncleared ones.
     const FIRE: &str = r##"
 var __fired = 0;
 try { __dispatch(document, { type: 'DOMContentLoaded' }); } catch (e) {}
@@ -379,6 +392,9 @@ while (__queue.length > 0 && __fired < 10000) {
   try {
     if (typeof t.fn === 'function') { t.fn(); } else { eval(t.fn); }
   } catch (e) {}
+  if (t.every !== undefined && !__cleared[t.id]) {
+    __queue.push({ id: t.id, fn: t.fn, due: t.due + t.every, every: t.every });
+  }
 }
 "##;
 
@@ -743,6 +759,46 @@ mod tests {
             &[],
         );
         assert_eq!(writes, vec!["one".to_string(), "two".to_string()]);
+    }
+
+    #[cfg(feature = "boa")]
+    #[test]
+    fn boa_interval_repeats_until_cleared() {
+        let (_r, writes, _) = boa_impl::run_with_bindings(
+            "var n = 0; var id = setInterval(function(){ n++; document.write('tick' + n); if (n >= 3) clearInterval(id); }, 0);",
+            "T",
+            &[],
+        );
+        assert_eq!(
+            writes,
+            vec![
+                "tick1".to_string(),
+                "tick2".to_string(),
+                "tick3".to_string()
+            ]
+        );
+    }
+
+    #[cfg(feature = "boa")]
+    #[test]
+    fn boa_clear_interval_cancels() {
+        let (_r, writes, _) = boa_impl::run_with_bindings(
+            "var id = setInterval(function(){ document.write('never'); }, 0); clearInterval(id); setTimeout(function(){ document.write('ran'); }, 1);",
+            "T",
+            &[],
+        );
+        assert_eq!(writes, vec!["ran".to_string()]);
+    }
+
+    #[cfg(feature = "boa")]
+    #[test]
+    fn boa_interval_stopped_by_timeout() {
+        let (_r, writes, _) = boa_impl::run_with_bindings(
+            "var n = 0; var id = setInterval(function(){ n++; }, 1); setTimeout(function(){ clearInterval(id); document.write('stopped-at-' + n); }, 5);",
+            "T",
+            &[],
+        );
+        assert_eq!(writes, vec!["stopped-at-4".to_string()]);
     }
 
     #[cfg(feature = "boa")]
