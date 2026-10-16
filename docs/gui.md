@@ -9,5 +9,6 @@ Run: `cargo run -q -p aerova-shell --features gui,boa --bin aerova-gui -- [url]`
 - Typing is ignored while Ctrl/Alt is held. Gestures read keys with `KeyRepeat::No`, so each press fires exactly once; typing uses `KeyRepeat::Yes` so holding a key repeats characters.
 - Alt+Left / Alt+Right walk the current tab's history, F5 reloads; address-bar loads push history.
 - Click: hit-tests layout boxes, dispatches `click` with bubbling into the live page; new writes show in the status line.
+- Perf: the content framebuffer converts to u32 once per page load; every frame copies only the 800x600 viewport rows, so short taps register instead of falling between slow frames.
 - Esc or window close quits. Page text also prints to stdout on load.
 - Limits: no text selection, no `setInterval`, attribute/class writes are JS-local, clicks never relayout (no mutation API yet).

@@ -480,7 +480,9 @@ fn draw_text(buf: &mut [u32], x: usize, y: usize, s: &str, color: u32) {
     }
 }
 
-fn draw(buf: &mut [u32], tabs: &Tabs, url: &str, status: &str) {
+/// `src` is the page framebuffer as u32, converted once per page load: it
+/// never changes with scrolling, so each frame only copies viewport rows.
+fn draw(buf: &mut [u32], tabs: &Tabs, src: &[u32], url: &str, status: &str) {
     fill_rect(buf, 0, 0, WIN_W, TAB_BAR, GRAY);
     let list = tabs.mgr.list();
     let cell = tab_cell_w(list.len());
@@ -498,7 +500,6 @@ fn draw(buf: &mut [u32], tabs: &Tabs, url: &str, status: &str) {
     fill_rect(buf, 0, STATUS_Y, WIN_W, BAR, GRAY);
     let page = tabs.page();
     let top = page.scroll_y() as usize;
-    let src = fb_to_u32(&page.fb);
     for y in 0..PAGE_H {
         let row = (top + y).min(src.len() / PAGE_W - 1) * PAGE_W;
         for x in 0..PAGE_W {
@@ -564,6 +565,9 @@ fn main() {
     window.set_target_fps(60);
     let mut tabs = Tabs::open(&start);
     println!("{}", tabs.page().text);
+    // Converted once per load: clicks only append text and scrolling only
+    // moves the viewport, so this stays valid until the next navigation.
+    let mut src = fb_to_u32(&tabs.page().fb);
     let mut editor = Editor::new(start);
     let mut status = String::from(
         "esc quits | enter loads | alt+arrows history | f5 reload | ctrl+t/w/tab | ctrl+arrows jump | drag bar",
@@ -578,19 +582,27 @@ fn main() {
         let gesture = window.get_keys_pressed(KeyRepeat::No);
         match nav_action(&gesture, alt, ctrl) {
             Some(Nav::Back) => match tabs.back() {
-                Some(_) => sync_bar(&tabs, &mut editor, &mut status),
+                Some(_) => {
+                    src = fb_to_u32(&tabs.page().fb);
+                    sync_bar(&tabs, &mut editor, &mut status);
+                }
                 None => status = String::from("no back history"),
             },
             Some(Nav::Forward) => match tabs.forward() {
-                Some(_) => sync_bar(&tabs, &mut editor, &mut status),
+                Some(_) => {
+                    src = fb_to_u32(&tabs.page().fb);
+                    sync_bar(&tabs, &mut editor, &mut status);
+                }
                 None => status = String::from("no forward history"),
             },
             Some(Nav::Reload) => {
                 tabs.reload();
+                src = fb_to_u32(&tabs.page().fb);
                 sync_bar(&tabs, &mut editor, &mut status);
             }
             Some(Nav::NewTab) => {
                 tabs.new_tab("aerova://home");
+                src = fb_to_u32(&tabs.page().fb);
                 sync_bar(&tabs, &mut editor, &mut status);
             }
             Some(Nav::CloseTab) => {
@@ -622,6 +634,7 @@ fn main() {
                         let url = normalize_url(&editor.buf);
                         tabs.go(&url);
                         println!("{}", tabs.page().text);
+                        src = fb_to_u32(&tabs.page().fb);
                         sync_bar(&tabs, &mut editor, &mut status);
                     }
                     _ => {
@@ -665,7 +678,7 @@ fn main() {
             }
         }
         was_down = down;
-        draw(&mut buf, &tabs, &editor.buf, &status);
+        draw(&mut buf, &tabs, &src, &editor.buf, &status);
         window
             .update_with_buffer(&buf, WIN_W, WIN_H)
             .unwrap_or_else(|e| {
@@ -732,11 +745,13 @@ mod tests {
         let y = PAGE_Y + 2;
         let mut tall = vec![0u32; WIN_W * WIN_H];
         let tabs = Tabs::open_html(&long_html());
-        draw(&mut tall, &tabs, "u", "s");
+        let src = fb_to_u32(&tabs.page().fb);
+        draw(&mut tall, &tabs, &src, "u", "s");
         assert_eq!(tall[y * WIN_W + x], THUMB);
         let mut short = vec![0u32; WIN_W * WIN_H];
         let tabs = Tabs::open_html("<p>hi</p>");
-        draw(&mut short, &tabs, "u", "s");
+        let src = fb_to_u32(&tabs.page().fb);
+        draw(&mut short, &tabs, &src, "u", "s");
         assert_ne!(short[y * WIN_W + x], THUMB);
     }
 
@@ -775,17 +790,31 @@ mod tests {
     #[test]
     fn draw_moves_content_with_scroll() {
         let mut tabs = Tabs::open_html(&long_html());
+        let src = fb_to_u32(&tabs.page().fb);
         let mut before = vec![0u32; WIN_W * WIN_H];
-        draw(&mut before, &tabs, "u", "s");
+        draw(&mut before, &tabs, &src, "u", "s");
         tabs.page_mut().scroll_by(600);
         let mut after = vec![0u32; WIN_W * WIN_H];
-        draw(&mut after, &tabs, "u", "s");
+        draw(&mut after, &tabs, &src, "u", "s");
         let diff = before
             .iter()
             .zip(after.iter())
             .filter(|(a, b)| a != b)
             .count();
         assert!(diff > 1000, "content did not move: {diff}");
+    }
+
+    #[test]
+    fn click_after_scroll_hits_bottom_item() {
+        let mut h = long_html();
+        h.push_str("<script>document.querySelectorAll('p')[29].addEventListener('click', function () { document.write('CLICKED:PARA'); });</script>");
+        let mut t = Tabs::open_html(&h);
+        t.page_mut().scroll_to(u32::MAX);
+        let writes = t.click(400, 570);
+        assert!(
+            writes.iter().any(|w| w.contains("CLICKED:PARA")),
+            "writes: {writes:?}"
+        );
     }
 
     #[test]
