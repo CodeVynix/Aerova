@@ -347,6 +347,7 @@ var document = {
 };
 
 var window = globalThis;
+var location = { href: "" };
 var console = { log: __aerova_log };
 
 function setTimeout(fn, ms) {
@@ -434,6 +435,13 @@ while (__queue.length > 0 && __fired < 10000) {
             Ok(Self { ctx })
         }
 
+        /// Set `location.href` for this world. Call before running scripts;
+        /// assigning `location.href` from JS changes the value but never navigates.
+        pub fn set_url(&mut self, url: &str) {
+            let src = format!("location.href = {url:?};");
+            let _ = self.ctx.eval(Source::from_bytes(src.as_str()));
+        }
+
         fn take_output(&mut self) -> (Vec<String>, Vec<String>) {
             let writes = WRITES.with(|w| std::mem::take(&mut *w.borrow_mut()));
             let logs = LOGS.with(|l| std::mem::take(&mut *l.borrow_mut()));
@@ -510,6 +518,9 @@ impl JsSession {
     pub fn new(_title: &str, _dom: &[DomEl]) -> Result<Self, String> {
         Ok(Self)
     }
+
+    /// No JS world without Boa; kept for call-shape parity.
+    pub fn set_url(&mut self, _url: &str) {}
 
     /// Scan `document.write` / `int+int`, like `run_script_with_dom`.
     pub fn run(&mut self, source: &str) -> (Result<String, String>, Vec<String>, Vec<String>) {
@@ -799,6 +810,19 @@ mod tests {
             &[],
         );
         assert_eq!(writes, vec!["stopped-at-4".to_string()]);
+    }
+
+    #[cfg(feature = "boa")]
+    #[test]
+    fn boa_location_href_reflects_set_url() {
+        let mut s = boa_impl::JsSession::new("T", &[]).unwrap();
+        s.set_url("file:///tmp/x.html");
+        let (r, writes, _) = s.run("document.write(window.location.href + '|' + location.href);");
+        assert!(r.is_ok());
+        assert_eq!(
+            writes,
+            vec!["file:///tmp/x.html|file:///tmp/x.html".to_string()]
+        );
     }
 
     #[cfg(feature = "boa")]

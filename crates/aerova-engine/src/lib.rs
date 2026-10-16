@@ -400,6 +400,13 @@ impl Page {
     /// # Errors
     /// Returns JS setup error string.
     pub fn open(html: &str) -> Result<Self, String> {
+        Self::open_with_url(html, "")
+    }
+
+    /// Parse HTML, run scripts once, lay out + paint, with `location.href`.
+    /// # Errors
+    /// Returns JS setup error string.
+    pub fn open_with_url(html: &str, url: &str) -> Result<Self, String> {
         let doc = aerova_html::parse(html);
         let mut title: Option<String> = None;
         for n in &doc.nodes {
@@ -407,6 +414,7 @@ impl Page {
         }
         let dom = dom_snapshot(&doc);
         let mut js = aerova_js::JsSession::new(title.as_deref().unwrap_or(""), &dom)?;
+        js.set_url(url);
         let mut text = visible_text(&doc);
         let css_text = extract_css(&doc);
         let rules = aerova_css::parse(&css_text);
@@ -493,7 +501,7 @@ impl Page {
     pub fn open_url(url: &str) -> Result<Self, String> {
         let (bytes, _ct) = aerova_net::fetch(url).map_err(|e| e.to_string())?;
         let html = String::from_utf8_lossy(&bytes).to_string();
-        Self::open(&html)
+        Self::open_with_url(&html, url)
     }
 }
 
@@ -717,6 +725,17 @@ mod tests {
         assert!(page.text.contains('x'));
         assert!(page.click(5, 5).is_empty());
         assert!(page.click(10, 500).is_empty());
+    }
+
+    #[cfg(feature = "boa")]
+    #[test]
+    fn page_location_href_is_page_url() {
+        let page = Page::open_with_url(
+            "<p>hi</p><script>document.write(window.location.href);</script>",
+            "file:///tmp/x.html",
+        )
+        .unwrap();
+        assert!(page.text.contains("file:///tmp/x.html"));
     }
 
     #[test]

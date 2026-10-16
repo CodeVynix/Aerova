@@ -28,6 +28,10 @@ Requires `--features boa`.
 - Drain is capped at 10000 callbacks per script run to stay finite.
 - `setInterval(fn, ms)` / `clearInterval(id)` repeat until cleared; an uncleared interval burns the same 10000-callback cap, so pages stay finite.
 
+## Location
+- `window.location.href` (also bare `location.href`) reflects the navigated URL on live pages; static `render_text` output sees `""`.
+- Assigning `location.href` from JS changes the value but does not navigate yet.
+
 ## Lifecycle
 - One `DOMContentLoaded` is dispatched on `document` after the main script, before timers.
 
