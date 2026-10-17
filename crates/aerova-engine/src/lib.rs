@@ -304,6 +304,126 @@ fn dom_snapshot(doc: &aerova_dom::Document) -> Vec<aerova_js::DomEl> {
     v
 }
 
+/// Child-index paths in `dom_snapshot` order. Keep the skip rules in sync
+/// with `dom_snapshot`: paths[i] locates snapshot element i in the doc.
+fn snapshot_paths(doc: &aerova_dom::Document) -> Vec<Vec<usize>> {
+    use aerova_dom::Node;
+    fn walk(n: &Node, here: Vec<usize>, out: &mut Vec<Vec<usize>>) {
+        match n {
+            Node::Text(_) => {}
+            Node::Element { tag, children, .. } => {
+                if tag == "style" || tag == "script" || tag == "head" || tag == "title" {
+                    return;
+                }
+                out.push(here.clone());
+                for (i, c) in children.iter().enumerate() {
+                    let mut p = here.clone();
+                    p.push(i);
+                    walk(c, p, out);
+                }
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for (i, n) in doc.nodes.iter().enumerate() {
+        walk(n, vec![i], &mut out);
+    }
+    out
+}
+
+fn node_at<'a>(
+    doc: &'a mut aerova_dom::Document,
+    path: &[usize],
+) -> Option<&'a mut aerova_dom::Node> {
+    use aerova_dom::Node;
+    let mut cur: &'a mut Node = doc.nodes.get_mut(*path.first()?)?;
+    for &i in &path[1..] {
+        cur = match cur {
+            Node::Element { children, .. } => children.get_mut(i)?,
+            Node::Text(_) => return None,
+        };
+    }
+    Some(cur)
+}
+
+fn new_node(el: &aerova_js::NewEl) -> aerova_dom::Node {
+    let mut attrs = Vec::new();
+    if !el.id.is_empty() {
+        attrs.push(("id".to_string(), el.id.clone()));
+    }
+    if !el.classes.is_empty() {
+        attrs.push(("class".to_string(), el.classes.join(" ")));
+    }
+    attrs.extend(el.attrs.iter().cloned());
+    let children = if el.text.is_empty() {
+        Vec::new()
+    } else {
+        vec![aerova_dom::Node::Text(el.text.clone())]
+    };
+    aerova_dom::Node::Element {
+        tag: el.tag.clone(),
+        attrs,
+        children,
+    }
+}
+
+/// Drain JS-created elements into the parsed doc; returns their texts.
+/// Unplaceable nodes (cycles, detached parents) are dropped.
+fn apply_created_elements(doc: &mut aerova_dom::Document) -> Vec<String> {
+    use aerova_dom::Node;
+    use aerova_js::ParentRef;
+    let new = aerova_js::take_created();
+    if new.is_empty() {
+        return Vec::new();
+    }
+    let paths = snapshot_paths(doc);
+    let mut loc: Vec<Option<Vec<usize>>> = vec![None; new.len()];
+    for _ in 0..=new.len() {
+        let mut progress = false;
+        for (k, el) in new.iter().enumerate() {
+            if loc[k].is_some() {
+                continue;
+            }
+            match el.parent {
+                None => {
+                    doc.nodes.push(new_node(el));
+                    loc[k] = Some(vec![doc.nodes.len() - 1]);
+                    progress = true;
+                }
+                Some(ParentRef::Snap(p)) => {
+                    if let Some(path) = paths.get(p) {
+                        if let Some(Node::Element { children, .. }) = node_at(doc, path) {
+                            children.push(new_node(el));
+                            let mut lp = path.clone();
+                            lp.push(children.len() - 1);
+                            loc[k] = Some(lp);
+                            progress = true;
+                        }
+                    }
+                }
+                Some(ParentRef::New(r)) => {
+                    if let Some(lp) = loc.get(r).and_then(|o| o.clone()) {
+                        if let Some(Node::Element { children, .. }) = node_at(doc, &lp) {
+                            children.push(new_node(el));
+                            let mut np = lp;
+                            np.push(children.len() - 1);
+                            loc[k] = Some(np);
+                            progress = true;
+                        }
+                    }
+                }
+            }
+        }
+        if !progress {
+            break;
+        }
+    }
+    new.iter()
+        .filter(|e| !e.text.is_empty())
+        .map(|e| e.text.clone())
+        .collect()
+}
+
 fn paint_tree(fb: &mut aerova_paint::Framebuffer, b: &aerova_layout::BoxNode) {
     if let Some(bg) = b.background() {
         if let Some(rgb) = aerova_paint::parse_color(bg) {
@@ -354,7 +474,7 @@ pub fn render_text(
     Vec<aerova_layout::BoxNode>,
     aerova_paint::Framebuffer,
 ) {
-    let doc = aerova_html::parse(html);
+    let mut doc = aerova_html::parse(html);
     let mut text = visible_text(&doc);
     let css_text = extract_css(&doc);
     let rules = aerova_css::parse(&css_text);
@@ -371,6 +491,12 @@ pub fn render_text(
                 text.push(' ');
             }
             text.push_str(w);
+        }
+        for t in apply_created_elements(&mut doc) {
+            if !text.is_empty() {
+                text.push(' ');
+            }
+            text.push_str(&t);
         }
     }
     let boxes = aerova_layout::layout(&doc, &rules);
@@ -407,7 +533,7 @@ impl Page {
     /// # Errors
     /// Returns JS setup error string.
     pub fn open_with_url(html: &str, url: &str) -> Result<Self, String> {
-        let doc = aerova_html::parse(html);
+        let mut doc = aerova_html::parse(html);
         let mut title: Option<String> = None;
         for n in &doc.nodes {
             find_title(n, &mut title);
@@ -434,6 +560,12 @@ impl Page {
             }
             text.push_str(w);
         }
+        for t in apply_created_elements(&mut doc) {
+            if !text.is_empty() {
+                text.push(' ');
+            }
+            text.push_str(&t);
+        }
         let boxes = aerova_layout::layout(&doc, &rules);
         let fb = content_fb(&boxes);
         Ok(Self {
@@ -448,13 +580,16 @@ impl Page {
 
     /// Click at viewport coords (origin is the page area, not the window):
     /// hit-test, dispatch `click` with bubbling. Returns new writes (also
-    /// appended to `text`).
+    /// appended to `text`). Elements created by click listeners are dropped:
+    /// no click-time relayout yet, and keeping them would leak them into the
+    /// next page's registry drain.
     pub fn click(&mut self, x: u32, y: u32) -> Vec<String> {
         let Some(idx) = aerova_layout::hit_test(&self.boxes, x, y.saturating_add(self.scroll_y))
         else {
             return Vec::new();
         };
         let (_, writes, _) = self.js.dispatch(idx, "click");
+        let _ = aerova_js::take_created();
         for w in &writes {
             if !self.text.is_empty() {
                 self.text.push(' ');
@@ -736,6 +871,20 @@ mod tests {
         )
         .unwrap();
         assert!(page.text.contains("file:///tmp/x.html"));
+    }
+
+    #[cfg(feature = "boa")]
+    #[test]
+    fn page_created_element_renders() {
+        let mut html = String::from("<style>p { height: 40px; }</style>");
+        for i in 0..20 {
+            html.push_str(&format!("<p>line {i}</p>"));
+        }
+        let plain = Page::open(&html).unwrap();
+        html.push_str("<script>var p = document.createElement('p'); p.textContent = 'injected'; p.setAttribute('style', 'height: 60px'); document.appendChild(p);</script>");
+        let live = Page::open(&html).unwrap();
+        assert!(live.text.contains("injected"));
+        assert!(live.content_h() > plain.content_h());
     }
 
     #[test]

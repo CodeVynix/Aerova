@@ -27,6 +27,44 @@ pub struct DomEl {
     pub parent: Option<usize>,
 }
 
+/// Parent of a JS-created element: an original snapshot index, or another
+/// created element by registry order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParentRef {
+    /// Original `__DOM` snapshot index.
+    Snap(usize),
+    /// Registry index of a fellow created element.
+    New(usize),
+}
+
+/// One JS-created element awaiting insertion into the parsed doc.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NewEl {
+    /// Lowercased tag.
+    pub tag: String,
+    /// Raw id (may be empty).
+    pub id: String,
+    /// Lowercased class list.
+    pub classes: Vec<String>,
+    /// Non-id/class attributes.
+    pub attrs: Vec<(String, String)>,
+    /// Text content.
+    pub text: String,
+    /// Where to attach; `None` means top-level.
+    pub parent: Option<ParentRef>,
+}
+
+thread_local! {
+    static NEW_ELS: RefCell<Vec<NewEl>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Drain JS-created elements (always empty without `boa`).
+/// No clear on session start: every script-running flow takes after its
+/// scripts (`Page`, `render_text`); one-shot evals are process-scoped.
+pub fn take_created() -> Vec<NewEl> {
+    NEW_ELS.with(|n| std::mem::take(&mut *n.borrow_mut()))
+}
+
 #[cfg(feature = "boa")]
 fn escape_json(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
@@ -154,7 +192,7 @@ fn scan_writes(source: &str) -> Vec<String> {
 
 #[cfg(feature = "boa")]
 mod boa_impl {
-    use super::{dom_to_json, DomEl, STUB_WRITES};
+    use super::{dom_to_json, DomEl, NewEl, ParentRef, NEW_ELS, STUB_WRITES};
     use boa_engine::{
         js_string, native_function::NativeFunction, Context, JsResult, JsValue, Source,
     };
@@ -186,6 +224,91 @@ mod boa_impl {
             );
         }
         LOGS.with(|l| l.borrow_mut().push(parts.join(" ")));
+        Ok(JsValue::undefined())
+    }
+
+    fn str_arg(args: &[JsValue], i: usize, ctx: &mut Context) -> String {
+        args.get(i)
+            .and_then(|v| v.to_string(ctx).ok())
+            .map(|s| s.to_std_string_escaped())
+            .unwrap_or_default()
+    }
+
+    fn num_arg(args: &[JsValue], i: usize, ctx: &mut Context) -> f64 {
+        args.get(i)
+            .and_then(|v| v.to_number(ctx).ok())
+            .unwrap_or(f64::NAN)
+    }
+
+    /// Register a created element; returns its registry index.
+    fn aerova_create(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+        let tag = str_arg(args, 0, ctx).to_lowercase();
+        let idx = NEW_ELS.with(|n| {
+            let mut n = n.borrow_mut();
+            let idx = n.len();
+            n.push(NewEl {
+                tag,
+                ..Default::default()
+            });
+            idx
+        });
+        Ok(JsValue::from(idx as f64))
+    }
+
+    /// Attach a created element: parent kind (-1 top, 0 snapshot, 1 created).
+    fn aerova_append(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+        let kind = num_arg(args, 0, ctx);
+        let pi = num_arg(args, 1, ctx);
+        let r = num_arg(args, 2, ctx);
+        if !r.is_finite() {
+            return Ok(JsValue::undefined());
+        }
+        let parent = if kind == -1.0 {
+            None
+        } else if kind == 0.0 && pi.is_finite() && pi >= 0.0 {
+            Some(ParentRef::Snap(pi as usize))
+        } else if kind == 1.0 && pi.is_finite() && pi >= 0.0 {
+            Some(ParentRef::New(pi as usize))
+        } else {
+            return Ok(JsValue::undefined());
+        };
+        NEW_ELS.with(|n| {
+            if let Some(c) = n.borrow_mut().get_mut(r as usize) {
+                c.parent = parent;
+            }
+        });
+        Ok(JsValue::undefined())
+    }
+
+    /// Update a created element: 0 text, 1 id, 2 classes, 3 attr, 4 unattr.
+    fn aerova_mutate(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+        let r = num_arg(args, 0, ctx);
+        let kind = num_arg(args, 1, ctx);
+        if !r.is_finite() || !kind.is_finite() {
+            return Ok(JsValue::undefined());
+        }
+        let a = str_arg(args, 2, ctx);
+        let b = str_arg(args, 3, ctx);
+        NEW_ELS.with(|n| {
+            if let Some(c) = n.borrow_mut().get_mut(r as usize) {
+                match kind as i32 {
+                    0 => c.text = a,
+                    1 => c.id = a,
+                    2 => {
+                        c.classes = a.split_whitespace().map(|w| w.to_lowercase()).collect();
+                    }
+                    3 => {
+                        if let Some(slot) = c.attrs.iter_mut().find(|(k, _)| k == &a) {
+                            slot.1 = b;
+                        } else {
+                            c.attrs.push((a, b));
+                        }
+                    }
+                    4 => c.attrs.retain(|(k, _)| k != &a),
+                    _ => {}
+                }
+            }
+        });
         Ok(JsValue::undefined())
     }
 
@@ -239,29 +362,39 @@ function __wrap(i) {
   if (i === null || i === undefined || i < 0 || i >= __DOM.length) return null;
   if (__wrappers[i]) return __wrappers[i];
   var e = __DOM[i];
-  var o = { tag: e.tag, id: e.id, textContent: e.text, classes: e.classes.slice(), attrs: (e.attrs || []).slice() };
+  var o = { tag: e.tag, id: e.id, classes: e.classes.slice(), attrs: (e.attrs || []).slice() };
+  o.__idx = i;
+  o.__text = e.text;
   o.__listeners = [];
   o.__parent = e.parent === null || e.parent === undefined ? null : e.parent;
+  Object.defineProperty(o, 'textContent', {
+    get: function () { return o.__text; },
+    set: function (v) { o.__text = String(v); __syncText(o); }
+  });
   Object.defineProperty(o, 'className', {
     get: function () { return o.classes.join(' '); },
     set: function (v) {
       var parts = String(v).split(' ');
       o.classes = [];
       for (var j = 0; j < parts.length; j++) if (parts[j].length > 0) o.classes.push(parts[j]);
+      __syncClasses(o);
     }
   });
   o.getAttribute = function (k) { return __attrVal(o, k); };
   o.setAttribute = function (k, v) {
-    for (var j = 0; j < o.attrs.length; j++) if (o.attrs[j][0] === k) { o.attrs[j][1] = String(v); return; }
-    o.attrs.push([k, String(v)]);
+    v = String(v);
+    for (var j = 0; j < o.attrs.length; j++) if (o.attrs[j][0] === k) { o.attrs[j][1] = v; __syncAttr(o, k, v); return; }
+    o.attrs.push([k, v]);
+    __syncAttr(o, k, v);
   };
   o.removeAttribute = function (k) {
-    for (var j = 0; j < o.attrs.length; j++) if (o.attrs[j][0] === k) { o.attrs.splice(j, 1); return; }
+    for (var j = 0; j < o.attrs.length; j++) if (o.attrs[j][0] === k) { o.attrs.splice(j, 1); break; }
+    __syncUnattr(o, k);
   };
   o.hasAttribute = function (k) { return __attrVal(o, k) !== null; };
   o.classList = {
-    add: function (c) { if (o.classes.indexOf(c) < 0) o.classes.push(c); },
-    remove: function (c) { var i = o.classes.indexOf(c); if (i >= 0) o.classes.splice(i, 1); },
+    add: function (c) { if (o.classes.indexOf(c) < 0) o.classes.push(c); __syncClasses(o); },
+    remove: function (c) { var i = o.classes.indexOf(c); if (i >= 0) o.classes.splice(i, 1); __syncClasses(o); },
     contains: function (c) { return o.classes.indexOf(c) >= 0; },
     toggle: function (c) {
       if (o.classList.contains(c)) { o.classList.remove(c); return false; }
@@ -278,6 +411,7 @@ function __wrap(i) {
     return false;
   };
   o.dispatchEvent = function (ev) { return __dispatch(this, ev); };
+  o.appendChild = function (c) { return __append(o, c); };
   __wrappers[i] = o;
   return o;
 }
@@ -287,6 +421,66 @@ function __parentOf(node) {
   var p = node.__parent;
   if (p === null || p === undefined) return document;
   return __wrap(p);
+}
+
+/// Mirror a created node's fields into its `__DOM` entry and Rust.
+/// No-op for snapshot nodes, whose mutations stay wrapper-local.
+function __mirror(o) {
+  if (o.__r === undefined || o.__r < 0) return false;
+  var d = __DOM[o.__idx];
+  d.id = o.id; d.classes = o.classes.slice(); d.text = o.__text;
+  return true;
+}
+
+function __syncText(o) {
+  if (!__mirror(o)) return;
+  __aerova_mutate(o.__r, 0, o.__text, "");
+}
+
+function __syncClasses(o) {
+  if (!__mirror(o)) return;
+  __aerova_mutate(o.__r, 2, o.classes.join(' '), "");
+}
+
+function __syncAttr(o, k, v) {
+  if (o.__r === undefined || o.__r < 0) return;
+  var kind = 3, a = k, b = v;
+  if (k === 'id') { o.id = v; kind = 1; a = v; b = ""; }
+  else if (k === 'class') {
+    o.classes = [];
+    var ps = v.split(' ');
+    for (var j = 0; j < ps.length; j++) if (ps[j].length > 0) o.classes.push(ps[j]);
+    kind = 2; a = o.classes.join(' '); b = "";
+  }
+  var d = __DOM[o.__idx];
+  d.id = o.id; d.classes = o.classes.slice(); d.text = o.__text;
+  __aerova_mutate(o.__r, kind, a, b);
+}
+
+function __syncUnattr(o, k) {
+  if (o.__r === undefined || o.__r < 0) return;
+  var kind = 4, a = k;
+  if (k === 'id') { o.id = ""; kind = 1; a = ""; }
+  else if (k === 'class') { o.classes = []; kind = 2; a = ""; }
+  var d = __DOM[o.__idx];
+  d.id = o.id; d.classes = o.classes.slice(); d.text = o.__text;
+  __aerova_mutate(o.__r, kind, a, "");
+}
+
+/// Attach a created node. Only created nodes attach; moving existing
+/// nodes is not supported. Returns the child, or null.
+function __append(parent, child) {
+  if (!child || child.__r === undefined || child.__r < 0) return null;
+  var kind = -1, pi = 0;
+  if (parent !== document) {
+    if (parent.__r !== undefined && parent.__r >= 0) { kind = 1; pi = parent.__r; }
+    else if (parent.__idx !== undefined) { kind = 0; pi = parent.__idx; }
+    else return null;
+  }
+  child.__parent = (parent === document) ? null : parent.__idx;
+  __DOM[child.__idx].parent = child.__parent;
+  __aerova_append(kind, pi, child.__r);
+  return child;
 }
 
 function __dispatch(target, ev) {
@@ -343,7 +537,17 @@ var document = {
     for (var k = 0; k < ls.length; k++) if (ls[k].type === t && ls[k].fn === fn) { ls.splice(k, 1); return true; }
     return false;
   },
-  dispatchEvent: function (ev) { return __dispatch(this, ev); }
+  dispatchEvent: function (ev) { return __dispatch(this, ev); },
+  appendChild: function (c) { return __append(document, c); },
+  createElement: function (tag) {
+    var t = String(tag).toLowerCase();
+    var idx = __DOM.length;
+    __DOM.push({ tag: t, id: "", classes: [], text: "", attrs: [], parent: null });
+    var w = __wrap(idx);
+    var r = __aerova_create(t);
+    if (typeof r === 'number' && r >= 0) w.__r = r;
+    return w;
+  }
 };
 
 var window = globalThis;
@@ -421,6 +625,24 @@ while (__queue.length > 0 && __fired < 10000) {
                 js_string!("__aerova_log"),
                 1,
                 NativeFunction::from_fn_ptr(console_log),
+            )
+            .map_err(|e| format!("boa-bind: {e}"))?;
+            ctx.register_global_callable(
+                js_string!("__aerova_create"),
+                1,
+                NativeFunction::from_fn_ptr(aerova_create),
+            )
+            .map_err(|e| format!("boa-bind: {e}"))?;
+            ctx.register_global_callable(
+                js_string!("__aerova_append"),
+                3,
+                NativeFunction::from_fn_ptr(aerova_append),
+            )
+            .map_err(|e| format!("boa-bind: {e}"))?;
+            ctx.register_global_callable(
+                js_string!("__aerova_mutate"),
+                4,
+                NativeFunction::from_fn_ptr(aerova_mutate),
             )
             .map_err(|e| format!("boa-bind: {e}"))?;
             let setup_src = format!(
@@ -823,6 +1045,36 @@ mod tests {
             writes,
             vec!["file:///tmp/x.html|file:///tmp/x.html".to_string()]
         );
+    }
+
+    #[cfg(feature = "boa")]
+    #[test]
+    fn boa_created_element_is_queryable() {
+        let (_r, writes, _) = boa_impl::run_with_bindings(
+            "var p = document.createElement('p'); p.textContent = 'injected'; p.setAttribute('id', 'newp'); document.getElementById('main').appendChild(p); document.write(document.querySelectorAll('p').length + '|' + document.getElementById('newp').textContent);",
+            "T",
+            &fixture_dom(),
+        );
+        assert_eq!(writes, vec!["1|injected".to_string()]);
+    }
+
+    #[cfg(feature = "boa")]
+    #[test]
+    fn boa_created_elements_drain_with_parents() {
+        let (_r, _, _) = boa_impl::run_with_bindings(
+            "var p = document.createElement('p'); p.textContent = 'hi'; p.setAttribute('id', 'a'); p.classList.add('big'); document.querySelector('div').appendChild(p); var q = document.createElement('span'); document.appendChild(q);",
+            "T",
+            &fixture_dom(),
+        );
+        let new = take_created();
+        assert_eq!(new.len(), 2);
+        assert_eq!(new[0].tag, "p");
+        assert_eq!(new[0].text, "hi");
+        assert_eq!(new[0].id, "a");
+        assert_eq!(new[0].classes, vec!["big".to_string()]);
+        assert_eq!(new[0].parent, Some(ParentRef::Snap(0)));
+        assert_eq!(new[1].tag, "span");
+        assert_eq!(new[1].parent, None);
     }
 
     #[cfg(feature = "boa")]

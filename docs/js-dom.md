@@ -13,7 +13,11 @@ Requires `--features boa`.
 - `classList` with `add`, `remove`, `contains`, `toggle`.
 - `addEventListener(type, fn)`, `removeEventListener(type, fn)`, `dispatchEvent(ev)`.
 - Attribute and class mutations are JS-local: they do not re-render, because Aerova renders before scripts run and has no style recalc yet.
-- No DOM mutation API (`createElement`/`appendChild`) yet; `document.write` appends to the text buffer, not to `__DOM`, so written nodes are not queryable.
+## Mutation
+- `document.createElement(tag)` + `appendChild` on elements and `document`; created nodes render after scripts run and are queryable.
+- `textContent =`, `setAttribute`, `removeAttribute`, `className =`, `classList` sync back on created nodes only; moving existing nodes is not supported.
+- Elements created by click listeners are dropped (no click-time relayout yet).
+- Click targeting on created nodes is exact for single and same-parent appends; creation order differing from document order across parents may mis-target clicks.
 
 ## Events
 - `dispatchEvent` accepts `{type:'..', bubbles:bool}` or a bare string; returns `false` if `preventDefault()` was called.
@@ -37,4 +41,4 @@ Requires `--features boa`.
 
 ## Stub (default, no `boa`)
 - `document.write` scan only; query/timer/event calls degrade silently.
-- Same known gaps as v1: `document.write` appends to the text buffer, not to `__DOM`, so written nodes are not queryable; the DOM snapshot is flat apart from the parent chain used for bubbling, and there is no DOM mutation API (`createElement`/`appendChild`) yet.
+- Same known gaps as v1: `document.write` appends to the text buffer, not to `__DOM`, so written nodes are not queryable; the DOM snapshot is flat apart from the parent chain used for bubbling, and page scripts share one live session while static `render_text` runs one session per `<script>` tag (created nodes still render, but later tags cannot query earlier tags' nodes).
