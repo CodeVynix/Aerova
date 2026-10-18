@@ -64,7 +64,9 @@ pub fn layout(doc: &Document, rules: &[Rule]) -> Vec<BoxNode> {
                 continue;
             }
         }
-        out.push(layout_node(n, 0, &mut y, rules, None, &mut next, &mut ancs));
+        out.push(layout_node(
+            n, 0, &mut y, 800, rules, None, &mut next, &mut ancs,
+        ));
     }
     out
 }
@@ -133,18 +135,77 @@ fn has_width_decl(
     None
 }
 
+/// First pixel value for `name` in the computed style (`auto`/absent → None).
+fn px(style: &[(String, String)], name: &str) -> Option<u32> {
+    style
+        .iter()
+        .find(|(k, _)| k == name)
+        .and_then(|(_, v)| parse_px(v))
+}
+
+/// Raw value for `name`, for shorthand expansion.
+fn raw<'a>(style: &'a [(String, String)], name: &str) -> Option<&'a str> {
+    style
+        .iter()
+        .find(|(k, _)| k == name)
+        .map(|(_, v)| v.as_str())
+}
+
+/// CSS box sides for `margin`/`padding`: shorthand 1-4 values, then longhand
+/// per-side overrides. Bad/`auto` values are 0. `[top, right, bottom, left]`.
+fn sides(style: &[(String, String)], name: &str) -> [u32; 4] {
+    let mut out = [0u32; 4];
+    if let Some(v) = raw(style, name) {
+        let parts: Vec<u32> = v.split_whitespace().filter_map(parse_px).collect();
+        match parts.len() {
+            1 => out = [parts[0]; 4],
+            2 => out = [parts[0], parts[1], parts[0], parts[1]],
+            3 => out = [parts[0], parts[1], parts[2], parts[1]],
+            4.. => out = [parts[0], parts[1], parts[2], parts[3]],
+            _ => {}
+        }
+    }
+    for (i, long) in ["-top", "-right", "-bottom", "-left"].iter().enumerate() {
+        if let Some(v) = px(style, &format!("{name}{long}")) {
+            out[i] = v;
+        }
+    }
+    out
+}
+
+/// `margin` sides for a node, for flex item placement.
+fn margins_of(n: &Node, ancs: &[(&str, &[(String, String)])], rules: &[Rule]) -> [u32; 4] {
+    let (tag, attrs) = match n {
+        Node::Element { tag, attrs, .. } => (tag.as_str(), attrs.as_slice()),
+        Node::Text(_) => return [0; 4],
+    };
+    sides(&specified_styles(tag, attrs, ancs, rules), "margin")
+}
+
+/// `gap` on a flex row: `gap: <row> <column>`; a row lays out on the column part.
+fn gap_h(style: &[(String, String)]) -> u32 {
+    match raw(style, "gap").map(|v| {
+        v.split_whitespace()
+            .filter_map(parse_px)
+            .collect::<Vec<_>>()
+    }) {
+        Some(p) if p.len() >= 2 => p[1],
+        Some(p) => p[0],
+        _ => px(style, "column-gap").unwrap_or(0),
+    }
+}
+
 fn styled_width(
     tag: &str,
     attrs: &Attrs,
-    x: u32,
+    avail: u32,
     ancs: &[(&str, &[(String, String)])],
     rules: &[Rule],
 ) -> u32 {
-    let base = 800u32.saturating_sub(x);
     if let Some(px) = has_width_decl(tag, attrs, ancs, rules) {
-        return px.min(base);
+        return px.min(avail);
     }
-    base
+    avail
 }
 
 fn is_flex_tag(
@@ -177,29 +238,30 @@ fn flex_direction(
     "row"
 }
 
+#[allow(clippy::too_many_arguments)]
 fn layout_node<'a>(
     n: &'a Node,
     x: u32,
     y: &mut u32,
+    avail_w: u32,
     rules: &[Rule],
     cur: Option<usize>,
     next: &mut usize,
     ancs: &mut Vec<(&'a str, &'a [(String, String)])>,
 ) -> BoxNode {
     match n {
-        Node::Text(t) => {
+        Node::Text(_) => {
             let b = BoxNode {
                 kind: "#text".into(),
                 x,
                 y: *y,
-                w: 800u32.saturating_sub(x),
+                w: avail_w,
                 h: 20,
                 style: Vec::new(),
                 el: cur,
                 children: vec![],
             };
             *y += 20;
-            let _ = t;
             b
         }
         Node::Element {
@@ -219,15 +281,21 @@ fn layout_node<'a>(
                     children: vec![],
                 };
             }
+            let style = specified_styles(tag, attrs, ancs, rules);
             if is_flex_tag(tag, attrs, ancs, rules)
                 && flex_direction(tag, attrs, ancs, rules) == "row"
             {
-                return layout_flex_row(tag, attrs, children, x, y, rules, next, ancs);
+                return layout_flex_row(tag, attrs, children, x, y, avail_w, rules, next, ancs);
             }
             let mine = Some(alloc_index(next));
-            let start = *y;
-            let style = specified_styles(tag, attrs, ancs, rules);
-            let w = styled_width(tag, attrs, x, ancs, rules);
+            let [mt, mr, mb, ml] = sides(&style, "margin");
+            let [pt, pr, pb, pl] = sides(&style, "padding");
+            let border_w = styled_width(tag, attrs, avail_w, ancs, rules).saturating_sub(ml + mr);
+            let content_x = x + ml + pl;
+            let content_w = border_w.saturating_sub(pl + pr);
+            let box_y = *y + mt;
+            let content_top = box_y + pt;
+            let mut inner_y = content_top;
             let mut kids = Vec::new();
             ancs.push((tag.as_str(), attrs.as_slice()));
             for c in children {
@@ -236,24 +304,32 @@ fn layout_node<'a>(
                         continue;
                     }
                 }
-                kids.push(layout_node(c, x + 10, y, rules, mine, next, ancs));
+                kids.push(layout_node(
+                    c,
+                    content_x,
+                    &mut inner_y,
+                    content_w,
+                    rules,
+                    mine,
+                    next,
+                    ancs,
+                ));
             }
             let _ = ancs.pop();
-            let content_h = *y - start;
+            let content_h = inner_y - content_top;
             let wanted = styled_height(tag, attrs, ancs, rules).unwrap_or(0);
-            let h = content_h.max(if kids.is_empty() {
+            let min_content = if kids.is_empty() {
                 wanted.max(20)
             } else {
                 wanted
-            });
-            if h > content_h {
-                *y = start + h;
-            }
+            };
+            let h = pt + content_h.max(min_content) + pb;
+            *y = box_y + h + mb;
             BoxNode {
                 kind: tag.clone(),
                 x,
-                y: start,
-                w,
+                y: box_y,
+                w: border_w,
                 h,
                 style,
                 el: mine,
@@ -271,14 +347,18 @@ fn layout_flex_row<'a>(
     children: &'a [Node],
     x: u32,
     y: &mut u32,
+    avail_w: u32,
     rules: &[Rule],
     next: &mut usize,
     ancs: &mut Vec<(&'a str, &'a [(String, String)])>,
 ) -> BoxNode {
     let mine = Some(alloc_index(next));
-    let start_y = *y;
     let style = specified_styles(tag, attrs, ancs, rules);
-    let w = styled_width(tag, attrs, x, ancs, rules);
+    let [mt, mr, mb, ml] = sides(&style, "margin");
+    let [pt, pr, pb, pl] = sides(&style, "padding");
+    let border_w = styled_width(tag, attrs, avail_w, ancs, rules).saturating_sub(ml + mr);
+    let content_w = border_w.saturating_sub(pl + pr);
+    let gap = gap_h(&style);
     let visual: Vec<&Node> = children
         .iter()
         .filter(|c| match c {
@@ -289,39 +369,41 @@ fn layout_flex_row<'a>(
         })
         .collect();
     let n = visual.len().max(1) as u32;
-    let share = w / n;
+    let share = content_w.saturating_sub(gap * (n - 1)) / n;
+    let box_y = *y + mt;
+    let content_top = box_y + pt;
     let mut kids = Vec::new();
-    let mut cx = x;
+    let mut cx = x + ml + pl;
+    let row_x = x + ml + pl;
     let mut max_h = 0;
     ancs.push((tag, attrs.as_slice()));
     for c in visual {
-        let item_w = match c {
+        let [imt, imr, _, iml] = margins_of(c, ancs, rules);
+        let avail = match c {
             Node::Text(_) => share,
             Node::Element {
                 tag: ct, attrs: ca, ..
             } => has_width_decl(ct, ca, ancs, rules)
                 .unwrap_or(share)
-                .min(w.saturating_sub(cx - x)),
+                .min(content_w.saturating_sub(cx.saturating_sub(row_x))),
         };
-        let mut item = layout_flex_item(c, cx, item_w, rules, mine, next, ancs);
-        item.x = cx;
-        item.y = start_y;
-        if item.w == 0 || item.w > item_w {
-            item.w = item_w;
-        }
-        max_h = max_h.max(item.h);
+        let cap = avail.saturating_sub(iml + imr);
+        let item = layout_flex_item(c, cx + iml, content_top + imt, cap, rules, mine, next, ancs);
+        let item_w = item.w;
+        let item_h = item.h;
         kids.push(item);
-        cx += item_w;
+        max_h = max_h.max(imt + item_h + imr);
+        cx += iml + item_w + imr + gap;
     }
     let _ = ancs.pop();
     let wanted = styled_height(tag, attrs, ancs, rules).unwrap_or(0);
-    let h = max_h.max(wanted).max(if kids.is_empty() { 20 } else { 0 });
-    *y = start_y + h;
+    let h = (pt + max_h + pb).max(wanted.max(20));
+    *y = box_y + h + mb;
     BoxNode {
         kind: tag.to_string(),
         x,
-        y: start_y,
-        w,
+        y: box_y,
+        w: border_w,
         h,
         style,
         el: mine,
@@ -329,9 +411,11 @@ fn layout_flex_row<'a>(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn layout_flex_item<'a>(
     n: &'a Node,
     x: u32,
+    y: u32,
     cap_w: u32,
     rules: &[Rule],
     cur: Option<usize>,
@@ -342,7 +426,7 @@ fn layout_flex_item<'a>(
         Node::Text(_) => BoxNode {
             kind: "#text".into(),
             x,
-            y: 0,
+            y,
             w: cap_w,
             h: 20,
             style: Vec::new(),
@@ -356,7 +440,10 @@ fn layout_flex_item<'a>(
         } => {
             let mine = Some(alloc_index(next));
             let style = specified_styles(tag, attrs, ancs, rules);
-            let mut inner_y = 0;
+            let [pt, pr, pb, pl] = sides(&style, "padding");
+            let box_w = has_width_decl(tag, attrs, ancs, rules).map_or(cap_w, |px| px.min(cap_w));
+            let content_w = box_w.saturating_sub(pl + pr);
+            let mut inner_y = y + pt;
             let mut kids = Vec::new();
             ancs.push((tag.as_str(), attrs.as_slice()));
             for c in children {
@@ -365,24 +452,31 @@ fn layout_flex_item<'a>(
                         continue;
                     }
                 }
-                kids.push(layout_node(c, 0, &mut inner_y, rules, mine, next, ancs));
+                kids.push(layout_node(
+                    c,
+                    pl,
+                    &mut inner_y,
+                    content_w,
+                    rules,
+                    mine,
+                    next,
+                    ancs,
+                ));
             }
             let _ = ancs.pop();
-            let content_h = inner_y;
+            let content_h = inner_y - (y + pt);
             let wanted = styled_height(tag, attrs, ancs, rules).unwrap_or(0);
-            let h = content_h.max(if kids.is_empty() {
+            let min_content = if kids.is_empty() {
                 wanted.max(20)
             } else {
                 wanted
-            });
-            let w = has_width_decl(tag, attrs, ancs, rules)
-                .unwrap_or(cap_w)
-                .min(cap_w);
+            };
+            let h = pt + content_h.max(min_content) + pb;
             BoxNode {
                 kind: tag.clone(),
                 x,
-                y: 0,
-                w,
+                y,
+                w: box_w,
                 h,
                 style,
                 el: mine,
@@ -578,5 +672,190 @@ mod tests {
         let text = find_kind(&span.children, "#text").unwrap();
         assert_eq!(hit_test(&boxes, text.x + 1, text.y + 1), Some(1));
         assert_eq!(hit_test(&boxes, 10, 500), None);
+    }
+
+    #[test]
+    fn sides_expands_shorthand_and_longhand_wins() {
+        let style = |pairs: &[(&str, &str)]| -> Vec<(String, String)> {
+            pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect()
+        };
+        assert_eq!(sides(&style(&[("margin", "10px")]), "margin"), [10; 4]);
+        assert_eq!(
+            sides(&style(&[("margin", "10px 20px")]), "margin"),
+            [10, 20, 10, 20]
+        );
+        assert_eq!(
+            sides(&style(&[("margin", "1px 2px 3px 4px")]), "margin"),
+            [1, 2, 3, 4]
+        );
+        assert_eq!(
+            sides(
+                &style(&[("margin", "5px"), ("margin-left", "7px")]),
+                "margin"
+            ),
+            [5, 5, 5, 7]
+        );
+        assert_eq!(sides(&style(&[("margin", "auto")]), "margin"), [0; 4]);
+        assert_eq!(sides(&style(&[]), "padding"), [0; 4]);
+    }
+
+    fn one_div(child: Node, css: &str) -> (Document, Vec<Rule>) {
+        (
+            Document {
+                nodes: vec![Node::Element {
+                    tag: "div".into(),
+                    attrs: vec![],
+                    children: vec![child],
+                }],
+            },
+            aerova_css::parse(css),
+        )
+    }
+
+    #[test]
+    fn margin_separates_blocks() {
+        let doc = Document {
+            nodes: vec![
+                Node::Element {
+                    tag: "p".into(),
+                    attrs: vec![],
+                    children: vec![Node::Text("a".into())],
+                },
+                Node::Element {
+                    tag: "p".into(),
+                    attrs: vec![],
+                    children: vec![Node::Text("b".into())],
+                },
+            ],
+        };
+        let boxes = layout(&doc, &aerova_css::parse("p { margin: 30px; }"));
+        assert_eq!(boxes[0].y, 30);
+        assert_eq!(boxes[0].h, 20);
+        assert_eq!(boxes[1].y, 110);
+    }
+
+    #[test]
+    fn padding_insets_children_and_grows_box() {
+        let (doc, rules) = one_div(Node::Text("hi".into()), "div { padding: 25px; }");
+        let boxes = layout(&doc, &rules);
+        let div = &boxes[0];
+        assert_eq!(div.w, 800);
+        assert_eq!(div.h, 70);
+        let text = &div.children[0];
+        assert_eq!((text.x, text.y, text.w), (25, 25, 750));
+    }
+
+    #[test]
+    fn padding_adds_to_declared_height() {
+        let (doc, rules) = one_div(
+            Node::Element {
+                tag: "span".into(),
+                attrs: vec![],
+                children: vec![],
+            },
+            "div { height: 40px; padding: 10px; }",
+        );
+        let boxes = layout(&doc, &rules);
+        assert_eq!(boxes[0].h, 60);
+    }
+
+    #[test]
+    fn horizontal_margin_shrinks_width() {
+        let (doc, rules) = one_div(Node::Text("hi".into()), "div { margin: 0 40px; }");
+        let boxes = layout(&doc, &rules);
+        assert_eq!(boxes[0].w, 720);
+        assert_eq!(boxes[0].children[0].x, 40);
+    }
+
+    #[test]
+    fn flex_gap_separates_items() {
+        let doc = Document {
+            nodes: vec![Node::Element {
+                tag: "div".into(),
+                attrs: vec![],
+                children: vec![
+                    Node::Element {
+                        tag: "span".into(),
+                        attrs: vec![],
+                        children: vec![Node::Text("a".into())],
+                    },
+                    Node::Element {
+                        tag: "span".into(),
+                        attrs: vec![],
+                        children: vec![Node::Text("b".into())],
+                    },
+                ],
+            }],
+        };
+        let boxes = layout(
+            &doc,
+            &aerova_css::parse("div { display: flex; gap: 10px; }"),
+        );
+        let row = &boxes[0];
+        assert_eq!(row.children[0].x, 0);
+        assert_eq!(row.children[0].w, 395);
+        assert_eq!(row.children[1].x, 405);
+        assert_eq!(row.children[0].y, row.children[1].y);
+    }
+
+    #[test]
+    fn flex_gap_column_value_wins_for_row() {
+        let doc = Document {
+            nodes: vec![Node::Element {
+                tag: "div".into(),
+                attrs: vec![],
+                children: vec![
+                    Node::Element {
+                        tag: "span".into(),
+                        attrs: vec![],
+                        children: vec![Node::Text("a".into())],
+                    },
+                    Node::Element {
+                        tag: "span".into(),
+                        attrs: vec![],
+                        children: vec![Node::Text("b".into())],
+                    },
+                ],
+            }],
+        };
+        let boxes = layout(
+            &doc,
+            &aerova_css::parse("div { display: flex; gap: 2px 30px; }"),
+        );
+        assert_eq!(boxes[0].children[1].x, 415);
+    }
+
+    #[test]
+    fn flex_item_margin_offsets_and_caps() {
+        let doc = Document {
+            nodes: vec![Node::Element {
+                tag: "div".into(),
+                attrs: vec![],
+                children: vec![
+                    Node::Element {
+                        tag: "span".into(),
+                        attrs: vec![],
+                        children: vec![Node::Text("a".into())],
+                    },
+                    Node::Element {
+                        tag: "span".into(),
+                        attrs: vec![],
+                        children: vec![Node::Text("b".into())],
+                    },
+                ],
+            }],
+        };
+        let boxes = layout(
+            &doc,
+            &aerova_css::parse("div { display: flex; } span { margin: 5px 10px; }"),
+        );
+        let row = &boxes[0];
+        assert_eq!(row.children[0].x, 10);
+        assert_eq!(row.children[0].w, 380);
+        assert_eq!(row.children[0].y, 5);
+        assert_eq!(row.h, 35);
     }
 }

@@ -753,6 +753,7 @@ mod tests {
         let div_box = boxes.iter().find(|b| b.kind == "div").unwrap();
         assert_eq!(div_box.h, 40);
         let i = ((div_box.y * 800 + div_box.x) as usize) * 4;
+        let i = i + 3 * 800 * 4;
         assert_eq!(&fb.pixels[i..i + 3], &[255, 0, 0]);
     }
 
@@ -779,6 +780,7 @@ mod tests {
         let nested = find_box(&boxes, "p").unwrap();
         assert_eq!(nested.h, 30);
         let i = ((nested.y * 800 + nested.x) as usize) * 4;
+        let i = i + 3 * 800 * 4;
         assert_eq!(&fb.pixels[i..i + 3], &[255, 0, 0]);
         let plain = boxes.iter().find(|b| b.kind == "p").unwrap();
         assert_eq!(plain.h, 20);
@@ -791,6 +793,7 @@ mod tests {
         let div_box = boxes.iter().find(|b| b.kind == "div").unwrap();
         assert_eq!(div_box.h, 20);
         let i = ((div_box.y * 800 + div_box.x) as usize) * 4;
+        let i = i + 3 * 800 * 4;
         assert_eq!(&fb.pixels[i..i + 3], &[0, 0, 255]);
     }
 
@@ -801,9 +804,11 @@ mod tests {
         let (_, boxes, fb) = render_text(html);
         let link = boxes.iter().find(|b| b.kind == "a" && b.h == 25).unwrap();
         let i = ((link.y * 800 + link.x) as usize) * 4;
+        let i = i + 3 * 800 * 4;
         assert_eq!(&fb.pixels[i..i + 3], &[255, 0, 0]);
         let bare = boxes.iter().find(|b| b.kind == "a" && b.h == 20).unwrap();
         let j = ((bare.y * 800 + bare.x) as usize) * 4;
+        let j = j + 3 * 800 * 4;
         assert_ne!(&fb.pixels[j..j + 3], &[255, 0, 0]);
     }
 
