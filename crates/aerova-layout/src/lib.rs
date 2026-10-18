@@ -454,7 +454,7 @@ fn layout_flex_item<'a>(
                 }
                 kids.push(layout_node(
                     c,
-                    pl,
+                    x + pl,
                     &mut inner_y,
                     content_w,
                     rules,
@@ -826,6 +826,52 @@ mod tests {
             &aerova_css::parse("div { display: flex; gap: 2px 30px; }"),
         );
         assert_eq!(boxes[0].children[1].x, 415);
+    }
+
+    #[test]
+    fn flex_item_children_sit_inside_their_box() {
+        let doc = Document {
+            nodes: vec![Node::Element {
+                tag: "div".into(),
+                attrs: vec![],
+                children: vec![
+                    Node::Element {
+                        tag: "span".into(),
+                        attrs: vec![],
+                        children: vec![Node::Text("a".into())],
+                    },
+                    Node::Element {
+                        tag: "span".into(),
+                        attrs: vec![],
+                        children: vec![Node::Text("b".into())],
+                    },
+                ],
+            }],
+        };
+        let boxes = layout(
+            &doc,
+            &aerova_css::parse(
+                "div { display: flex; gap: 20px; padding: 30px; } span { padding: 5px; }",
+            ),
+        );
+        let row = &boxes[0];
+        assert_eq!(row.children[0].x, 30);
+        for item in &row.children {
+            let text = &item.children[0];
+            assert_eq!(text.kind, "#text");
+            assert!(
+                text.x >= item.x,
+                "text x {} left of item x {}",
+                text.x,
+                item.x
+            );
+            assert!(text.x < item.x + item.w, "text past item right edge");
+            assert!(text.x == item.x + 5);
+        }
+        assert_eq!(
+            row.children[1].x,
+            row.children[0].x + row.children[0].w + 20
+        );
     }
 
     #[test]
