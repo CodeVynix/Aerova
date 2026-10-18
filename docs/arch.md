@@ -23,3 +23,13 @@ Pipeline: net -> html -> dom -> css -> layout -> paint -> shell. Search + JS are
 - No UA default margins (browsers give `p`/`body` margins; Aerova does not), so
   text sits flush at the content origin unless styles add spacing.
 - `flex-direction: column` still stacks as plain blocks; no column gap yet.
+
+## Text (paint)
+
+- `aerova-paint` owns the 5x7 bitmap font: `glyph`, `draw_text`, `draw_glyph`,
+  `text_width`, `chars_per_line`, `wrap`. The GUI chrome uses the same table, so
+  page text and URL/status text render identically.
+- Layout wraps each text node greedily to its content width (`wrap`, one line per
+  `LINE_H` = 20px) and stores the lines on the box's `text` field, joined by `\n`.
+- Rendering is uppercase-only ASCII; lowercase renders uppercase. No descenders,
+  no bold/italic, no subpixel positioning.

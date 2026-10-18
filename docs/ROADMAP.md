@@ -7,6 +7,7 @@
 - Phase 2 search: `index_url` crawl hook + `save/load` DB + `crawl/search --db`
 - JS: `boa_engine 0.20` optional behind `boa` feature, `eval()` dispatch
 - Style: cascade (`*`+tag), `height/width`, `background`, `<style>` extract, styled PPM
+- Text: 5x7 bitmap font + greedy wrap shared by paint, layout, and GUI chrome (page text no longer a placeholder bar)
 - Box model: block `margin`/`padding` (CSS shorthand + longhand) + flex `gap`, item margins/padding
 - Tabs: `TabManager` + `PerTabThread` panic containment + `tabs demo`
 - Lumora: frozen `BlitTarget` ABI + `MemorySurface` + `blit_to_raw_framebuffer` + `lumora-blit`

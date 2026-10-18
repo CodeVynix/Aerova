@@ -6,3 +6,4 @@ edition = "2021"
 [dependencies]
 aerova-dom = { path = "../aerova-dom" }
 aerova-css = { path = "../aerova-css" }
+aerova-paint = { path = "../aerova-paint" }

@@ -432,7 +432,13 @@ fn paint_tree(fb: &mut aerova_paint::Framebuffer, b: &aerova_layout::BoxNode) {
             }
         }
     } else if b.kind == "#text" {
-        fb.rect(b.x, b.y, b.w.min(800), 2, (220, 220, 220));
+        for (i, line) in b.text.split('\n').enumerate() {
+            let y = b.y + i as u32 * aerova_paint::LINE_H;
+            if y >= fb.height {
+                break;
+            }
+            aerova_paint::draw_text(fb, b.x, y, line, aerova_paint::INK);
+        }
     }
     for c in &b.children {
         paint_tree(fb, c);
@@ -752,8 +758,7 @@ mod tests {
         assert!(!boxes.is_empty());
         let div_box = boxes.iter().find(|b| b.kind == "div").unwrap();
         assert_eq!(div_box.h, 40);
-        let i = ((div_box.y * 800 + div_box.x) as usize) * 4;
-        let i = i + 3 * 800 * 4;
+        let i = ((div_box.y * 800 + div_box.x + div_box.w - 5) as usize) * 4;
         assert_eq!(&fb.pixels[i..i + 3], &[255, 0, 0]);
     }
 
@@ -779,8 +784,7 @@ mod tests {
         assert!(text.contains("hi"));
         let nested = find_box(&boxes, "p").unwrap();
         assert_eq!(nested.h, 30);
-        let i = ((nested.y * 800 + nested.x) as usize) * 4;
-        let i = i + 3 * 800 * 4;
+        let i = ((nested.y * 800 + nested.x + nested.w - 5) as usize) * 4;
         assert_eq!(&fb.pixels[i..i + 3], &[255, 0, 0]);
         let plain = boxes.iter().find(|b| b.kind == "p").unwrap();
         assert_eq!(plain.h, 20);
@@ -792,8 +796,7 @@ mod tests {
         let (_, boxes, fb) = render_text(html);
         let div_box = boxes.iter().find(|b| b.kind == "div").unwrap();
         assert_eq!(div_box.h, 20);
-        let i = ((div_box.y * 800 + div_box.x) as usize) * 4;
-        let i = i + 3 * 800 * 4;
+        let i = ((div_box.y * 800 + div_box.x + div_box.w - 5) as usize) * 4;
         assert_eq!(&fb.pixels[i..i + 3], &[0, 0, 255]);
     }
 
@@ -803,12 +806,10 @@ mod tests {
             "<style>a[href] { background: red; height: 25px; }</style><a href=\"x\">l</a><a>n</a>";
         let (_, boxes, fb) = render_text(html);
         let link = boxes.iter().find(|b| b.kind == "a" && b.h == 25).unwrap();
-        let i = ((link.y * 800 + link.x) as usize) * 4;
-        let i = i + 3 * 800 * 4;
+        let i = ((link.y * 800 + link.x + link.w - 5) as usize) * 4;
         assert_eq!(&fb.pixels[i..i + 3], &[255, 0, 0]);
         let bare = boxes.iter().find(|b| b.kind == "a" && b.h == 20).unwrap();
-        let j = ((bare.y * 800 + bare.x) as usize) * 4;
-        let j = j + 3 * 800 * 4;
+        let j = ((bare.y * 800 + bare.x + bare.w - 5) as usize) * 4;
         assert_ne!(&fb.pixels[j..j + 3], &[255, 0, 0]);
     }
 

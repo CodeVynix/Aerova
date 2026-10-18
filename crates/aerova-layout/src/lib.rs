@@ -3,7 +3,6 @@
 
 use aerova_css::{parse_px, specified_styles, Rule};
 use aerova_dom::{Document, Node};
-
 /// A laid-out box.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BoxNode {
@@ -24,6 +23,9 @@ pub struct BoxNode {
     pub el: Option<usize>,
     /// Children.
     pub children: Vec<BoxNode>,
+    /// Text content, already wrapped into lines joined by `\n`. Empty for
+    /// element boxes; `#text` boxes carry the lines to paint.
+    pub text: String,
 }
 
 impl BoxNode {
@@ -250,18 +252,20 @@ fn layout_node<'a>(
     ancs: &mut Vec<(&'a str, &'a [(String, String)])>,
 ) -> BoxNode {
     match n {
-        Node::Text(_) => {
+        Node::Text(t) => {
+            let lines = aerova_paint::wrap(t, avail_w);
             let b = BoxNode {
                 kind: "#text".into(),
                 x,
                 y: *y,
                 w: avail_w,
-                h: 20,
+                h: lines.len() as u32 * aerova_paint::LINE_H,
                 style: Vec::new(),
                 el: cur,
                 children: vec![],
+                text: lines.join("\n"),
             };
-            *y += 20;
+            *y += b.h;
             b
         }
         Node::Element {
@@ -279,6 +283,7 @@ fn layout_node<'a>(
                     style: specified_styles(tag, attrs, ancs, rules),
                     el: None,
                     children: vec![],
+                    text: String::new(),
                 };
             }
             let style = specified_styles(tag, attrs, ancs, rules);
@@ -334,6 +339,7 @@ fn layout_node<'a>(
                 style,
                 el: mine,
                 children: kids,
+                text: String::new(),
             }
         }
     }
@@ -408,6 +414,7 @@ fn layout_flex_row<'a>(
         style,
         el: mine,
         children: kids,
+        text: String::new(),
     }
 }
 
@@ -423,16 +430,20 @@ fn layout_flex_item<'a>(
     ancs: &mut Vec<(&'a str, &'a [(String, String)])>,
 ) -> BoxNode {
     match n {
-        Node::Text(_) => BoxNode {
-            kind: "#text".into(),
-            x,
-            y,
-            w: cap_w,
-            h: 20,
-            style: Vec::new(),
-            el: cur,
-            children: vec![],
-        },
+        Node::Text(t) => {
+            let lines = aerova_paint::wrap(t, cap_w);
+            BoxNode {
+                kind: "#text".into(),
+                x,
+                y,
+                w: cap_w,
+                h: lines.len() as u32 * aerova_paint::LINE_H,
+                style: Vec::new(),
+                el: cur,
+                children: vec![],
+                text: lines.join("\n"),
+            }
+        }
         Node::Element {
             tag,
             attrs,
@@ -481,6 +492,7 @@ fn layout_flex_item<'a>(
                 style,
                 el: mine,
                 children: kids,
+                text: String::new(),
             }
         }
     }

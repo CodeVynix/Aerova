@@ -50,6 +50,7 @@ version = "0.2.0"
 dependencies = [
  "aerova-css",
  "aerova-dom",
+ "aerova-paint",
 ]
 
 [[package]]
