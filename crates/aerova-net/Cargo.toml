@@ -5,3 +5,4 @@ edition = "2021"
 
 [dependencies]
 ureq = { version = "2", default-features = true }
+aerova-search = { path = "../aerova-search" }

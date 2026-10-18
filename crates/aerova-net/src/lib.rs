@@ -2,7 +2,89 @@
 //! Lumora impact: needs TCP/IP + DNS + TLS in Lumora; file/aerova paths stay offline.
 
 use std::io::Read as _;
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
+
+use aerova_search::Index;
+
+/// Global search index cache; loaded on first search from the default DB path.
+static SEARCH_INDEX: OnceLock<Mutex<Index>> = OnceLock::new();
+
+fn default_db_path() -> std::path::PathBuf {
+    std::env::temp_dir().join("aerova-search.db")
+}
+
+fn get_index() -> &'static Mutex<Index> {
+    SEARCH_INDEX.get_or_init(|| {
+        let path = default_db_path();
+        Mutex::new(Index::load(&path).unwrap_or_else(|_| Index::new()))
+    })
+}
+
+fn escape_html(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 16);
+    for c in s.chars() {
+        match c {
+            '&' => out.push('&'),
+            '<' => out.push('<'),
+            '>' => out.push('>'),
+            '"' => out.push('"'),
+            '\'' => out.push('\''),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+fn percent_decode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '%' {
+            if let (Some(h1), Some(h2)) = (chars.next(), chars.next()) {
+                if let Ok(byte) = u8::from_str_radix(&format!("{h1}{h2}"), 16) {
+                    out.push(byte as char);
+                    continue;
+                }
+            }
+            out.push('%');
+        } else if c == '+' {
+            out.push(' ');
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Render search results page for a query.
+fn render_search(query: &str) -> (Vec<u8>, String) {
+    let idx = get_index().lock().unwrap();
+    let results = idx.search(query, 20);
+    let mut html = String::from("<title>Search: ");
+    html.push_str(&escape_html(query));
+    html.push_str("</title><h1>Search: ");
+    html.push_str(&escape_html(query));
+    html.push_str("</h1>");
+    if results.is_empty() {
+        html.push_str("<p>No results.</p>");
+    } else {
+        html.push_str("<ul>");
+        for (id, score) in results {
+            if let Some((title, body)) = idx.get(id) {
+                let snippet = body.chars().take(160).collect::<String>();
+                html.push_str(&format!(
+                    "<li><strong>{}</strong> (score: {:.3})<br>{}</li>",
+                    escape_html(title),
+                    score,
+                    escape_html(&snippet)
+                ));
+            }
+        }
+        html.push_str("</ul>");
+    }
+    (html.into_bytes(), "text/html".to_string())
+}
 
 /// Fetch error.
 #[derive(Debug)]
@@ -62,6 +144,10 @@ pub fn fetch(url: &str) -> Result<(Vec<u8>, String), FetchError> {
             .map_err(|e| FetchError::Io(e.to_string()));
     }
     if url.starts_with("aerova://") {
+        if let Some(q) = url.strip_prefix("aerova://search?") {
+            let query = percent_decode(q);
+            return Ok(render_search(&query));
+        }
         let body = "<title>Aerova</title><p>Welcome to Aerova.</p>"
             .as_bytes()
             .to_vec();
@@ -106,5 +192,24 @@ mod tests {
         assert!(ct.contains("text/html"));
         assert!(String::from_utf8_lossy(&bytes).contains("hello local"));
         handle.join().unwrap();
+    }
+
+    #[test]
+    fn search_scheme_renders_results() {
+        // First populate the index with test data.
+        let idx = crate::get_index();
+        idx.lock().unwrap().add("Aerova Home", "Welcome to Aerova browser");
+        idx.lock().unwrap().add("Rust Guide", "Learn Rust programming");
+        let (bytes, ct) = fetch("aerova://search?q=aerova").unwrap();
+        assert_eq!(ct, "text/html");
+        let html = String::from_utf8(bytes).unwrap();
+        assert!(html.contains("Aerova Home"));
+        assert!(html.contains("score:"));
+    }
+
+    #[test]
+    fn percent_decode_works() {
+        assert_eq!(crate::percent_decode("hello+world%21"), "hello world!");
+        assert_eq!(crate::percent_decode("a%20b"), "a b");
     }
 }

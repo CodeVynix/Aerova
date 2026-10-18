@@ -33,3 +33,12 @@ Pipeline: net -> html -> dom -> css -> layout -> paint -> shell. Search + JS are
   `LINE_H` = 20px) and stores the lines on the box's `text` field, joined by `\n`.
 - Rendering is uppercase-only ASCII; lowercase renders uppercase. No descenders,
   no bold/italic, no subpixel positioning.
+
+## Search (net)
+
+- `aerova://search?q=` renders a BM25-ranked results page using the on-disk index
+  (`aerova-search.db` in `$TMPDIR`). The index is loaded once per process via a
+  `Mutex<Index>` behind a `OnceLock`.
+- Query params are percent-decoded (`+` → space, `%XX` → byte). Results show
+  title, BM25 score, and a 160-char body snippet; titles are boosted 3×.
+- `aerova-net` depends on `aerova-search` (new dep).

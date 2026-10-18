@@ -64,6 +64,7 @@ dependencies = [
 name = "aerova-net"
 version = "0.2.0"
 dependencies = [
+ "aerova-search",
  "ureq",
 ]
 
