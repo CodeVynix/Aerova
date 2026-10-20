@@ -16,7 +16,7 @@
 ## Next (ranked)
 
 1. ~~JS DOM bindings~~ (done) — expose `document/window/timers` to Boa, run `<script>` during `render_text`. Unblocks real pages.
-2. **Flexbox + block margin/padding (DONE)** — block `margin`/`padding` + flex `gap` land in `layout`. Next: UA default margins, column gap, inline/text wrapping.
+2. **Flexbox + block margin/padding (DONE)** — block `margin`/`padding` + flex `gap` land in `layout`. Next: UA default margins (DONE), column gap (DONE), inline/text wrapping (RECOMMENDED).
 3. **Search ranking v2 (DONE)** — BM25 + title boost + `aerova://search?q=` page with on-disk index.
 4. **Own JS VM (LATER)** — behind `own-vm` flag vs Boa. Do not block web compat on it.
 5. **Global crawler (HIGHLY DISCOURAGED now)** — needs fleet + politeness + spam. Stay local + explicit crawl list.

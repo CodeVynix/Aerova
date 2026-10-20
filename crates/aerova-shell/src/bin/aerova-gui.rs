@@ -644,7 +644,7 @@ mod tests {
     fn long_html() -> String {
         let mut h = String::new();
         for i in 0..30 {
-            h.push_str(&format!("<p style=\"height:60px\">line {i}</p>"));
+            h.push_str(&format!("<p style=\"height:60px; margin: 0\">line {i}</p>"));
         }
         h
     }

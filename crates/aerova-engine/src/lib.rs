@@ -949,7 +949,7 @@ mod tests {
     #[test]
     fn page_click_respects_scroll_offset() {
         let mut html = String::from(
-            "<style>p { height: 40px; }</style><script>document.querySelectorAll('p')[19].addEventListener('click', function () { document.write('last'); });</script>",
+            "<style>p { height: 40px; margin: 0; }</style><script>document.querySelectorAll('p')[19].addEventListener('click', function () { document.write('last'); });</script>",
         );
         for i in 0..20 {
             html.push_str(&format!("<p>line {i}</p>"));
