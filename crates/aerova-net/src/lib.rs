@@ -198,8 +198,12 @@ mod tests {
     fn search_scheme_renders_results() {
         // First populate the index with test data.
         let idx = crate::get_index();
-        idx.lock().unwrap().add("Aerova Home", "Welcome to Aerova browser");
-        idx.lock().unwrap().add("Rust Guide", "Learn Rust programming");
+        idx.lock()
+            .unwrap()
+            .add("Aerova Home", "Welcome to Aerova browser");
+        idx.lock()
+            .unwrap()
+            .add("Rust Guide", "Learn Rust programming");
         let (bytes, ct) = fetch("aerova://search?q=aerova").unwrap();
         assert_eq!(ct, "text/html");
         let html = String::from_utf8(bytes).unwrap();

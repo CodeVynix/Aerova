@@ -882,7 +882,7 @@ mod tests {
     #[cfg(feature = "boa")]
     #[test]
     fn page_created_element_renders() {
-        let mut html = String::from("<style>p { height: 40px; }</style>");
+        let mut html = String::from("<style>p { height: 40px; margin: 0; }</style>");
         for i in 0..20 {
             html.push_str(&format!("<p>line {i}</p>"));
         }
@@ -903,7 +903,7 @@ mod tests {
 
     #[test]
     fn long_page_grows_and_scroll_clamps() {
-        let mut html = String::from("<style>p { height: 40px; }</style>");
+        let mut html = String::from("<style>p { height: 40px; margin: 0; }</style>");
         for i in 0..20 {
             html.push_str(&format!("<p>line {i}</p>"));
         }

@@ -250,27 +250,26 @@ pub fn specified_styles(
     let mut hits: Vec<(u32, usize, String, String)> = Vec::new();
     let tag_lc = tag.to_lowercase();
     let ua_margin = match tag_lc.as_str() {
-        "p" => Some("1em"),
-        "h1" => Some("0.67em"),
-        "h2" => Some("0.83em"),
-        "h3" => Some("1em"),
-        "h4" => Some("1.33em"),
-        "h5" => Some("1.67em"),
-        "h6" => Some("2.33em"),
-        "ul" | "ol" => Some("1em"),
+        "p" => Some("20px"),
+        "h1" => Some("13px"),
+        "h2" => Some("17px"),
+        "h3" => Some("20px"),
+        "h4" => Some("27px"),
+        "h5" => Some("33px"),
+        "h6" => Some("47px"),
+        "ul" | "ol" => Some("20px"),
         "body" => Some("8px"),
-        "blockquote" => Some("1em"),
-        "pre" => Some("1em"),
-        "hr" => Some("0.5em"),
-        "figure" => Some("1em"),
+        "blockquote" => Some("20px"),
+        "pre" => Some("20px"),
+        "hr" => Some("10px"),
+        "figure" => Some("20px"),
         _ => None,
     };
     if let Some(m) = ua_margin {
-        hits.push((0, usize::MAX, "margin-top".to_string(), m.to_string()));
-        hits.push((0, usize::MAX, "margin-bottom".to_string(), m.to_string()));
+        hits.push((0, usize::MAX, "margin".to_string(), m.to_string()));
     }
     for (idx, r) in rules.iter().enumerate() {
-        if let Some(spec) = matches(&r.selector, &tag, attrs, ancestors) {
+        if let Some(spec) = matches(&r.selector, tag, attrs, ancestors) {
             for d in &r.declarations {
                 hits.push((spec, idx, d.property.clone(), d.value.clone()));
             }
