@@ -246,8 +246,29 @@ pub fn specified_styles(
     ancestors: &[(&str, &[(String, String)])],
     rules: &[Rule],
 ) -> Vec<(String, String)> {
-    let tag = tag.to_lowercase();
+    // UA default margins for block elements (like browsers).
     let mut hits: Vec<(u32, usize, String, String)> = Vec::new();
+    let tag_lc = tag.to_lowercase();
+    let ua_margin = match tag_lc.as_str() {
+        "p" => Some("1em"),
+        "h1" => Some("0.67em"),
+        "h2" => Some("0.83em"),
+        "h3" => Some("1em"),
+        "h4" => Some("1.33em"),
+        "h5" => Some("1.67em"),
+        "h6" => Some("2.33em"),
+        "ul" | "ol" => Some("1em"),
+        "body" => Some("8px"),
+        "blockquote" => Some("1em"),
+        "pre" => Some("1em"),
+        "hr" => Some("0.5em"),
+        "figure" => Some("1em"),
+        _ => None,
+    };
+    if let Some(m) = ua_margin {
+        hits.push((0, usize::MAX, "margin-top".to_string(), m.to_string()));
+        hits.push((0, usize::MAX, "margin-bottom".to_string(), m.to_string()));
+    }
     for (idx, r) in rules.iter().enumerate() {
         if let Some(spec) = matches(&r.selector, &tag, attrs, ancestors) {
             for d in &r.declarations {
