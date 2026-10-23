@@ -240,6 +240,162 @@ fn flex_direction(
     "row"
 }
 
+/// Elements that are inline by default (don't establish block formatting context).
+fn is_inline_tag(tag: &str) -> bool {
+    matches!(
+        tag,
+        "a" | "span" | "strong" | "em" | "b" | "i" | "u" | "code" | "br"
+        | "small" | "mark" | "sub" | "sup" | "cite" | "q" | "var" | "samp" | "kbd"
+        | "abbr" | "time" | "data" | "bdi" | "bdo" | "wbr"
+    )
+}
+
+/// Check if all children are inline (text or inline elements) AND there's at least one explicit inline element.
+/// Pure text children of a block element should use block layout (anonymous block boxes in CSS).
+fn all_children_inline(children: &[Node]) -> bool {
+    let mut has_inline_element = false;
+    for c in children {
+        match c {
+            Node::Text(_) => {}
+            Node::Element { tag, .. } => {
+                if is_inline_tag(tag) {
+                    has_inline_element = true;
+                } else {
+                    return false;
+                }
+            }
+        }
+    }
+    has_inline_element
+}
+
+/// A text run with its style and originating element index (for clicks).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct TextRun {
+    text: String,
+    style: Vec<(String, String)>,
+    el: Option<usize>,
+}
+
+/// Result of laying out inline content: line boxes.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct LineBox {
+    x: u32,
+    y: u32,
+    w: u32,
+    h: u32,
+    runs: Vec<TextRun>,
+}
+
+/// Lay out inline content into line boxes within available width.
+/// Returns the line boxes and the total height they occupy.
+fn layout_inline_content<'a>(
+    children: &[&Node],
+    content_x: u32,
+    content_y: u32,
+    content_w: u32,
+    rules: &[Rule],
+    cur: Option<usize>,
+    next: &mut usize,
+    ancs: &mut Vec<(&'a str, &'a [(String, String)])>,
+    pt: u32,
+    pb: u32,
+) -> (Vec<LineBox>, u32) {
+    const LINE_H: u32 = aerova_paint::LINE_H;
+    let mut lines = Vec::new();
+    let mut current_line = LineBox { x: content_x, y: content_y + pt, ..LineBox::default() };
+    let mut current_line_w = 0u32;
+    let mut current_line_h = aerova_paint::LINE_H;
+    let mut line_x = content_x;
+
+    for child in children {
+        let child = *child;
+        match child {
+            Node::Text(t) => {
+                if t.trim().is_empty() {
+                    continue;
+                }
+                let wrapped = aerova_paint::wrap(t, content_w);
+                for line_text in wrapped {
+                    let run_w = aerova_paint::text_width(&line_text);
+                    if line_x + run_w > content_x + content_w && current_line_w > 0 {
+                        current_line.w = current_line_w;
+                        current_line.h = current_line_h;
+                        lines.push(current_line);
+                        current_line = LineBox { x: content_x, y: content_y + pt, ..LineBox::default() };
+                        current_line_w = 0;
+                        current_line_h = aerova_paint::LINE_H;
+                        line_x = content_x;
+                    }
+                    let run = TextRun {
+                        text: line_text,
+                        style: Vec::new(),
+                        el: cur,
+                    };
+                    current_line.runs.push(run);
+                    current_line_w += run_w;
+                    line_x += run_w;
+                    current_line_h = current_line_h.max(aerova_paint::LINE_H);
+                }
+            }
+            Node::Element { tag, attrs, children } => {
+                if is_inline_tag(tag) {
+                    let child_mine = Some(alloc_index(next));
+                    let child_refs: Vec<&Node> = children.iter().collect();
+                    let (inner_lines, _inner_h) = layout_inline_content(
+                        &child_refs,
+                        content_x + current_line_w,
+                        content_y,
+                        content_w.saturating_sub(current_line_w),
+                        rules,
+                        child_mine,
+                        next,
+                        ancs,
+                        pt,
+                        pb,
+                    );
+                    for line in inner_lines {
+                        for run in line.runs {
+                            let run_w = aerova_paint::text_width(&run.text);
+                            if line_x + run_w > content_x + content_w && current_line_w > 0 {
+                                current_line.w = current_line_w;
+                                current_line.h = current_line_h;
+                                lines.push(current_line);
+                                current_line = LineBox { x: content_x, y: content_y + pt, ..LineBox::default() };
+                                current_line_w = 0;
+                                current_line_h = aerova_paint::LINE_H;
+                                line_x = content_x;
+                            }
+                            current_line.runs.push(run);
+                            current_line_w += run_w;
+                            line_x += run_w;
+                            current_line_h = current_line_h.max(line.h);
+                        }
+                    }
+                    current_line_h = current_line_h.max(aerova_paint::LINE_H);
+                } else {
+                    if current_line_w > 0 {
+                        current_line.w = current_line_w;
+                        current_line.h = current_line_h;
+                        lines.push(current_line);
+                        current_line = LineBox { x: content_x, y: content_y + pt, ..LineBox::default() };
+                        current_line_w = 0;
+                        current_line_h = aerova_paint::LINE_H;
+                        line_x = content_x;
+                    }
+                }
+            }
+        }
+    }
+    if current_line_w > 0 {
+        current_line.w = current_line_w;
+        current_line.h = current_line_h;
+        lines.push(current_line);
+    }
+    let total_h = pt + lines.iter().map(|l| l.h).sum::<u32>() + pb;
+    (lines, total_h)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn layout_node<'a>(
     n: &'a Node,
@@ -300,6 +456,55 @@ fn layout_node<'a>(
             let content_w = border_w.saturating_sub(pl + pr);
             let box_y = *y + mt;
             let content_top = box_y + pt;
+            
+            // Check if all children are inline - if so, use inline layout
+            if all_children_inline(children) {
+                let child_refs: Vec<&Node> = children.iter().collect();
+                let (lines, run_h) = layout_inline_content(
+                    &child_refs,
+                    content_x,
+                    box_y,
+                    content_w,
+                    rules,
+                    mine,
+                    next,
+                    ancs,
+                    pt,
+                    pb,
+                );
+                let mut kids = Vec::new();
+                for line in lines {
+                    let line_box = BoxNode {
+                        kind: "#line".into(),
+                        x: line.x,
+                        y: line.y,
+                        w: line.w,
+                        h: line.h,
+                        style: Vec::new(),
+                        el: line.runs.first().and_then(|r| r.el),
+                        children: vec![],
+                        text: line.runs.iter().map(|r| r.text.clone()).collect::<Vec<_>>().join("\n"),
+                    };
+                    kids.push(line_box);
+                }
+                let _ = ancs.pop();
+                let wanted = styled_height(tag, attrs, ancs, rules).unwrap_or(0);
+                let content_h = run_h.max(wanted);
+                let h = pt + content_h + pb;
+                *y = box_y + pt + content_h + pb + mb;
+                return BoxNode {
+                    kind: tag.clone(),
+                    x,
+                    y: box_y,
+                    w: border_w,
+                    h: pt + content_h + pb,
+                    style,
+                    el: mine,
+                    children: kids,
+                    text: String::new(),
+                };
+            }
+            
             let mut inner_y = content_top;
             let mut kids = Vec::new();
             ancs.push((tag.as_str(), attrs.as_slice()));
