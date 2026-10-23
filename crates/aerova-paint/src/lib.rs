@@ -313,10 +313,58 @@ mod tests {
             vec!["abcdefghij".to_string(), "klmno".to_string()]
         );
         assert_eq!(wrap("", w), vec![String::new()]);
-        assert_eq!(
-            wrap("a\n\nb", w),
-            vec!["a".to_string(), String::new(), "b".to_string()]
-        );
+        assert_eq!(wrap("a\n\nb", w), vec!["a".to_string(), String::new(), "b".to_string()]);
         assert_eq!(wrap("a\n", w), vec!["a".to_string()]);
+    }
+}
+
+use image::{DynamicImage, GenericImageView, ImageFormat};
+
+/// Decoded image data ready for painting.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecodedImage {
+    pub width: u32,
+    pub height: u32,
+    pub pixels: Vec<u8>, // RGBA
+}
+
+/// Decode image bytes (PNG/JPEG) into RGBA pixels.
+/// Returns (width, height, RGBA pixels).
+pub fn decode_image(bytes: &[u8]) -> Option<DecodedImage> {
+    let img = image::load_from_memory(bytes).ok()?;
+    let rgba = img.to_rgba8();
+    let (width, height) = rgba.dimensions();
+    Some(DecodedImage {
+        width,
+        height,
+        pixels: rgba.into_raw(),
+    })
+}
+
+/// Draw decoded image onto framebuffer at (x, y) with optional scaling.
+pub fn draw_image(fb: &mut Framebuffer, img: &DecodedImage, x: u32, y: u32, w: u32, h: u32) {
+    let src_w = img.width;
+    let src_h = img.height;
+    let scale_x = src_w as f32 / w as f32;
+    let scale_y = src_h as f32 / h as f32;
+    for dy in 0..h {
+        for dx in 0..w {
+            let sx = ((dx as f32) * scale_x) as u32;
+            let sy = ((dy as f32) * scale_y) as u32;
+            if sx >= img.width || sy >= img.height {
+                continue;
+            }
+            let src_idx = ((sy * img.width + sx) * 4) as usize;
+            let dst_x = x + dx;
+            let dst_y = y + dy;
+            if dst_x >= fb.width || dst_y >= fb.height {
+                continue;
+            }
+            let dst_idx = ((dst_y * fb.width + dst_x) * 4) as usize;
+            fb.pixels[dst_idx] = img.pixels[src_idx];
+            fb.pixels[dst_idx + 1] = img.pixels[src_idx + 1];
+            fb.pixels[dst_idx + 2] = img.pixels[src_idx + 2];
+            fb.pixels[dst_idx + 3] = img.pixels[src_idx + 3];
+        }
     }
 }

@@ -424,7 +424,7 @@ fn apply_created_elements(doc: &mut aerova_dom::Document) -> Vec<String> {
         .collect()
 }
 
-fn paint_tree(fb: &mut aerova_paint::Framebuffer, b: &aerova_layout::BoxNode) {
+fn paint_tree(fb: &mut aerova_paint::Framebuffer, b: &aerova_layout::BoxNode, images: &HashMap<String, aerova_paint::DecodedImage>) {
     if let Some(bg) = b.background() {
         if let Some(rgb) = aerova_paint::parse_color(bg) {
             if b.w > 0 && b.h > 0 {
@@ -439,9 +439,13 @@ fn paint_tree(fb: &mut aerova_paint::Framebuffer, b: &aerova_layout::BoxNode) {
             }
             aerova_paint::draw_text(fb, b.x, y, line, aerova_paint::INK);
         }
+    } else if b.kind == "img" {
+        // Draw image if available
+        // For now, draw a placeholder - the actual image URL would need to be stored
+        fb.rect(b.x, b.y, b.w.min(fb.width).min(800), b.h.min(fb.height), (200, 200, 200));
     }
     for c in &b.children {
-        paint_tree(fb, c);
+        paint_tree(fb, c, images);
     }
 }
 
@@ -463,10 +467,10 @@ fn content_bottom(boxes: &[aerova_layout::BoxNode]) -> u32 {
     m
 }
 
-fn content_fb(boxes: &[aerova_layout::BoxNode]) -> aerova_paint::Framebuffer {
+fn content_fb(boxes: &[aerova_layout::BoxNode], images: &HashMap<String, aerova_paint::DecodedImage>) -> aerova_paint::Framebuffer {
     let mut fb = aerova_paint::Framebuffer::new(800, content_bottom(boxes).max(PAGE_VIEW_H));
     for b in boxes {
-        paint_tree(&mut fb, b);
+        paint_tree(&mut fb, b, images);
     }
     fb
 }
@@ -505,8 +509,12 @@ pub fn render_text(
             text.push_str(&t);
         }
     }
-    let boxes = aerova_layout::layout(&doc, &rules);
-    let fb = content_fb(&boxes);
+    let mut images = HashMap::new();
+    for node in &doc.nodes {
+        collect_images(&mut images, node);
+    }
+    let boxes = aerova_layout::layout(&doc, &rules, &images);
+    let fb = content_fb(&boxes, &images);
     (text, boxes, fb)
 }
 
@@ -520,11 +528,32 @@ pub struct Page {
     /// Painted pixels; full content height, taller than the viewport when the
     /// page scrolls (`view_h` rows are shown at a time).
     pub fb: aerova_paint::Framebuffer,
+    /// Decoded images, keyed by URL.
+    images: HashMap<String, aerova_paint::DecodedImage>,
     /// Viewport height in px.
     view_h: u32,
     /// Vertical scroll offset in px.
     scroll_y: u32,
     js: aerova_js::JsSession,
+}
+
+fn collect_images(images: &mut HashMap<String, aerova_paint::DecodedImage>, node: &aerova_dom::Node) {
+    if let aerova_dom::Node::Element { tag, attrs, children } = node {
+        if tag == "img" {
+            if let Some((_, src)) = attrs.iter().find(|(k, _)| k == "src") {
+                if !images.contains_key(src) {
+                    if let Ok((bytes, _ct)) = aerova_net::fetch(src) {
+                        if let Some(img) = aerova_paint::decode_image(&bytes) {
+                            images.insert(src.clone(), img);
+                        }
+                    }
+                }
+            }
+        }
+        for child in children {
+            collect_images(images, child);
+        }
+    }
 }
 
 impl Page {
@@ -534,8 +563,6 @@ impl Page {
     pub fn open(html: &str) -> Result<Self, String> {
         Self::open_with_url(html, "")
     }
-
-    /// Parse HTML, run scripts once, lay out + paint, with `location.href`.
     /// # Errors
     /// Returns JS setup error string.
     pub fn open_with_url(html: &str, url: &str) -> Result<Self, String> {
@@ -572,12 +599,17 @@ impl Page {
             }
             text.push_str(&t);
         }
-        let boxes = aerova_layout::layout(&doc, &rules);
-        let fb = content_fb(&boxes);
+        let mut images = HashMap::new();
+        for node in &doc.nodes {
+            collect_images(&mut images, node);
+        }
+        let boxes = aerova_layout::layout(&doc, &rules, &images);
+        let fb = content_fb(&boxes, &images);
         Ok(Self {
             text,
             boxes,
             fb,
+            images,
             view_h: PAGE_VIEW_H,
             scroll_y: 0,
             js,

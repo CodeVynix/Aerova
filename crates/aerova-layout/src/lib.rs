@@ -3,6 +3,8 @@
 
 use aerova_css::{parse_px, specified_styles, Rule};
 use aerova_dom::{Document, Node};
+use aerova_paint::DecodedImage;
+use std::collections::HashMap;
 /// A laid-out box.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BoxNode {
@@ -55,7 +57,7 @@ impl BoxNode {
 /// Lay out document top-to-bottom with CSS rules. Width 800, row 20px default.
 /// Element boxes take snapshot indices in pre-order, matching `dom_snapshot`.
 #[must_use]
-pub fn layout(doc: &Document, rules: &[Rule]) -> Vec<BoxNode> {
+pub fn layout(doc: &Document, rules: &[Rule], images: &HashMap<String, aerova_paint::DecodedImage>) -> Vec<BoxNode> {
     let mut y = 0;
     let mut next = 0usize;
     let mut ancs: Vec<(&str, &[(String, String)])> = Vec::new();
@@ -67,7 +69,7 @@ pub fn layout(doc: &Document, rules: &[Rule]) -> Vec<BoxNode> {
             }
         }
         out.push(layout_node(
-            n, 0, &mut y, 800, rules, None, &mut next, &mut ancs,
+            n, 0, &mut y, 800, rules, None, &mut next, &mut ancs, images,
         ));
     }
     out
@@ -406,6 +408,7 @@ fn layout_node<'a>(
     cur: Option<usize>,
     next: &mut usize,
     ancs: &mut Vec<(&'a str, &'a [(String, String)])>,
+    images: &HashMap<String, aerova_paint::DecodedImage>,
 ) -> BoxNode {
     match n {
         Node::Text(t) => {
@@ -446,7 +449,77 @@ fn layout_node<'a>(
             if is_flex_tag(tag, attrs, ancs, rules)
                 && flex_direction(tag, attrs, ancs, rules) == "row"
             {
-                return layout_flex_row(tag, attrs, children, x, y, avail_w, rules, next, ancs);
+                return layout_flex_row(tag, attrs, children, x, y, avail_w, rules, next, ancs, images);
+            }
+            // Handle <img> as inline replaced element
+            if tag == "img" {
+                let src = attrs.iter().find(|(k, _)| k == "src").map(|(_, v)| v.as_str());
+                if let Some(src) = src {
+                    if let Some(img) = images.get(src) {
+                        let mine = Some(alloc_index(next));
+                        let [mt, mr, mb, ml] = sides(&style, "margin");
+                        let [pt, pr, pb, pl] = sides(&style, "padding");
+                        let border_w = styled_width(tag, attrs, avail_w, ancs, rules).saturating_sub(ml + mr);
+                        let content_x = x + ml + pl;
+                        let content_w = border_w.saturating_sub(pl + pr);
+                        let box_y = *y + mt;
+                        let content_top = box_y + pt;
+                        
+                        // Use intrinsic dimensions from the image, or fallback to CSS width/height
+                        let (img_w, img_h) = (img.width, img.height);
+                        let css_w = style.iter().find(|(k, _)| k == "width").and_then(|(_, v)| parse_px(v));
+                        let css_h = style.iter().find(|(k, _)| k == "height").and_then(|(k, v)| parse_px(v));
+                        let w = css_w.unwrap_or(img_w).min(avail_w);
+                        let h = css_h.unwrap_or(img_h);
+                        
+                        let [mt, mr, mb, ml] = sides(&style, "margin");
+                        let [pt, pr, pb, pl] = sides(&style, "padding");
+                        
+                        let box_y = *y + mt;
+                        let content_top = box_y + pt;
+                        let content_x = x + ml + pl;
+                        let content_w = w.saturating_sub(pl + pr);
+                        
+                        let inner_y = content_top + h;
+                        *y = box_y + pt + h + pb + mb;
+                        
+                        return BoxNode {
+                            kind: "img".into(),
+                            x: content_x,
+                            y: content_top,
+                            w,
+                            h,
+                            style,
+                            el: Some(alloc_index(next)),
+                            children: vec![],
+                            text: String::new(),
+                        };
+                    }
+                }
+                // Fallback: treat as inline box with default size
+                let mine = Some(alloc_index(next));
+                let [mt, mr, mb, ml] = sides(&style, "margin");
+                let [pt, pr, pb, pl] = sides(&style, "padding");
+                let border_w = styled_width(tag, attrs, avail_w, ancs, rules).saturating_sub(ml + mr);
+                let content_x = x + ml + pl;
+                let content_w = border_w.saturating_sub(pl + pr);
+                let box_y = *y + mt;
+                let content_top = box_y + pt;
+                let w = 100; // default image width
+                let h = 100; // default image height
+                let inner_y = box_y + pt + 100;
+                *y = box_y + pt + 100 + pb + mb;
+                return BoxNode {
+                    kind: "img".into(),
+                    x: content_x,
+                    y: box_y + pt,
+                    w,
+                    h,
+                    style,
+                    el: Some(alloc_index(next)),
+                    children: vec![],
+                    text: String::new(),
+                };
             }
             let mine = Some(alloc_index(next));
             let [mt, mr, mb, ml] = sides(&style, "margin");
@@ -523,6 +596,7 @@ fn layout_node<'a>(
                     mine,
                     next,
                     ancs,
+                    images,
                 ));
             }
             let _ = ancs.pop();
@@ -562,6 +636,7 @@ fn layout_flex_row<'a>(
     rules: &[Rule],
     next: &mut usize,
     ancs: &mut Vec<(&'a str, &'a [(String, String)])>,
+    images: &HashMap<String, aerova_paint::DecodedImage>,
 ) -> BoxNode {
     let mine = Some(alloc_index(next));
     let style = specified_styles(tag, attrs, ancs, rules);
@@ -599,7 +674,7 @@ fn layout_flex_row<'a>(
                 .min(content_w.saturating_sub(cx.saturating_sub(row_x))),
         };
         let cap = avail.saturating_sub(iml + imr);
-        let item = layout_flex_item(c, cx + iml, content_top + imt, cap, rules, mine, next, ancs);
+        let item = layout_flex_item(c, cx + iml, content_top + imt, cap, rules, mine, next, ancs, images);
         let item_w = item.w;
         let item_h = item.h;
         kids.push(item);
@@ -633,6 +708,7 @@ fn layout_flex_item<'a>(
     cur: Option<usize>,
     next: &mut usize,
     ancs: &mut Vec<(&'a str, &'a [(String, String)])>,
+    images: &HashMap<String, aerova_paint::DecodedImage>,
 ) -> BoxNode {
     match n {
         Node::Text(t) => {
@@ -677,6 +753,7 @@ fn layout_flex_item<'a>(
                     mine,
                     next,
                     ancs,
+                    images,
                 ));
             }
             let _ = ancs.pop();
@@ -724,7 +801,7 @@ mod tests {
                 },
             ],
         };
-        let boxes = layout(&doc, &[]);
+        let boxes = layout(&doc, &[], &std::collections::HashMap::new());
         assert_eq!(boxes.len(), 2);
         assert!(boxes[1].y >= boxes[0].y);
     }
@@ -739,7 +816,7 @@ mod tests {
             }],
         };
         let rules = aerova_css::parse("div { height: 60px; background: red; }");
-        let boxes = layout(&doc, &rules);
+        let boxes = layout(&doc, &rules, &std::collections::HashMap::new());
         assert_eq!(boxes[0].h, 60);
         assert_eq!(boxes[0].background(), Some("red"));
     }
@@ -765,7 +842,7 @@ mod tests {
             }],
         };
         let rules = aerova_css::parse("div { display: flex; }");
-        let boxes = layout(&doc, &rules);
+        let boxes = layout(&doc, &rules, &std::collections::HashMap::new());
         assert_eq!(boxes.len(), 1);
         let row = &boxes[0];
         assert!(row.is_flex());
@@ -795,7 +872,7 @@ mod tests {
             }],
         };
         let rules = aerova_css::parse("div { display: flex; flex-direction: column; }");
-        let boxes = layout(&doc, &rules);
+        let boxes = layout(&doc, &rules, &std::collections::HashMap::new());
         let row = &boxes[0];
         assert!(row.children[1].y >= row.children[0].y);
     }
@@ -821,7 +898,7 @@ mod tests {
             }],
         };
         let rules = aerova_css::parse(".row { display: flex; }");
-        let boxes = layout(&doc, &rules);
+        let boxes = layout(&doc, &rules, &std::collections::HashMap::new());
         assert!(boxes[0].is_flex());
         assert_eq!(boxes[0].children[0].y, boxes[0].children[1].y);
     }
@@ -857,7 +934,7 @@ mod tests {
     #[test]
     fn elements_carry_snapshot_indices_in_order() {
         for rules in [vec![], aerova_css::parse("div { display: flex; }")] {
-            let boxes = layout(&nested_doc(), &rules);
+            let boxes = layout(&nested_doc(), &rules, &std::collections::HashMap::new());
             let mut els = Vec::new();
             preorder_els(&boxes, &mut els);
             assert_eq!(
@@ -882,7 +959,7 @@ mod tests {
 
     #[test]
     fn hit_test_prefers_topmost_child() {
-        let boxes = layout(&nested_doc(), &[]);
+        let boxes = layout(&nested_doc(), &[], &std::collections::HashMap::new());
         let span = find_kind(&boxes, "span").unwrap();
         assert_eq!(span.el, Some(1));
         assert_eq!(hit_test(&boxes, span.x + 1, span.y + 1), Some(1));
@@ -948,7 +1025,7 @@ mod tests {
                 },
             ],
         };
-        let boxes = layout(&doc, &aerova_css::parse("p { margin: 30px; }"));
+        let boxes = layout(&doc, &aerova_css::parse("p { margin: 30px; }"), &std::collections::HashMap::new());
         assert_eq!(boxes[0].y, 30);
         assert_eq!(boxes[0].h, 20);
         assert_eq!(boxes[1].y, 110);
@@ -957,7 +1034,7 @@ mod tests {
     #[test]
     fn padding_insets_children_and_grows_box() {
         let (doc, rules) = one_div(Node::Text("hi".into()), "div { padding: 25px; }");
-        let boxes = layout(&doc, &rules);
+        let boxes = layout(&doc, &rules, &std::collections::HashMap::new());
         let div = &boxes[0];
         assert_eq!(div.w, 800);
         assert_eq!(div.h, 70);
@@ -975,14 +1052,14 @@ mod tests {
             },
             "div { height: 40px; padding: 10px; }",
         );
-        let boxes = layout(&doc, &rules);
+        let boxes = layout(&doc, &rules, &std::collections::HashMap::new());
         assert_eq!(boxes[0].h, 60);
     }
 
     #[test]
     fn horizontal_margin_shrinks_width() {
         let (doc, rules) = one_div(Node::Text("hi".into()), "div { margin: 0 40px; }");
-        let boxes = layout(&doc, &rules);
+        let boxes = layout(&doc, &rules, &std::collections::HashMap::new());
         assert_eq!(boxes[0].w, 720);
         assert_eq!(boxes[0].children[0].x, 40);
     }
@@ -1010,6 +1087,7 @@ mod tests {
         let boxes = layout(
             &doc,
             &aerova_css::parse("div { display: flex; gap: 10px; }"),
+            &std::collections::HashMap::new(),
         );
         let row = &boxes[0];
         assert_eq!(row.children[0].x, 0);
@@ -1041,6 +1119,7 @@ mod tests {
         let boxes = layout(
             &doc,
             &aerova_css::parse("div { display: flex; gap: 2px 30px; }"),
+            &std::collections::HashMap::new(),
         );
         assert_eq!(boxes[0].children[1].x, 415);
     }
@@ -1070,6 +1149,7 @@ mod tests {
             &aerova_css::parse(
                 "div { display: flex; gap: 20px; padding: 30px; } span { padding: 5px; }",
             ),
+            &std::collections::HashMap::new(),
         );
         let row = &boxes[0];
         assert_eq!(row.children[0].x, 30);
@@ -1114,6 +1194,7 @@ mod tests {
         let boxes = layout(
             &doc,
             &aerova_css::parse("div { display: flex; } span { margin: 5px 10px; }"),
+            &std::collections::HashMap::new(),
         );
         let row = &boxes[0];
         assert_eq!(row.children[0].x, 10);
